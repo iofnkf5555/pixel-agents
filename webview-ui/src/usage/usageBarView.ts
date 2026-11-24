@@ -1,10 +1,10 @@
 /**
- * What the usage bars show, from the last `usageLimits` the server sent. Pure
- * (no DOM, no clock of its own), so the rules are Node-tested.
+ * What the usage bars show, from the last `usageLimits` the server sent per vendor.
+ * Pure (no DOM, no clock of its own), so the rules are Node-tested.
  *
- * Reports only arrive while a Claude Code session is open, so the numbers can
- * be old. Two things stay true anyway: a window past its reset time has reset
- * (full bar, whatever was last reported), and the age of the numbers is shown.
+ * Quota windows reset automatically once past `resetsAt`. Vendors without a public
+ * quota API (e.g. Antigravity) render local rolling 5-hour / 7-day token activity
+ * without fabricating quota percentages.
  */
 
 import type { UsageWindow } from '../../../core/src/messages.js';
@@ -13,6 +13,9 @@ import {
   USAGE_BAR_WARN_FRACTION,
   USAGE_HEART_MAX_BPM,
 } from '../constants.js';
+import type { UsageEntry } from './usageStore.js';
+
+const CANONICAL_VENDOR_ORDER: readonly string[] = ['codex', 'claude', 'antigravity'];
 
 /** How full a bar reads, which colour band it is in, and what it says. */
 export interface UsageBarView {
@@ -77,4 +80,59 @@ export function freshnessLabel(
   if (updatedAtMs === undefined) return `Updates once a ${providerName} session replies`;
   const age = nowMs - updatedAtMs;
   return age < 60_000 ? 'Updated just now' : `Updated ${formatDuration(age)} ago`;
+}
+
+/** Compact non-cached token count for metered local activity bars. */
+export function formatCompactTokens(tokens: number): string {
+  if (!Number.isFinite(tokens) || tokens <= 0) return '0';
+  if (tokens < 1000) return String(Math.round(tokens));
+  if (tokens < 100_000) return `${(tokens / 1000).toFixed(1).replace(/\.0$/, '')}K`;
+  if (tokens < 1_000_000) return `${Math.round(tokens / 1000)}K`;
+  if (tokens < 100_000_000) return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+  if (tokens < 1_000_000_000) return `${Math.round(tokens / 1_000_000)}M`;
+  return `${(tokens / 1_000_000_000).toFixed(1).replace(/\.0$/, '')}B`;
+}
+
+/**
+ * Return strictly isolated vendor IDs to display in the top-left usage stack, ordered
+ * canonically (`codex`, `claude`, `antigravity`, then others sorted). A vendor appears
+ * only if it is active in the office or has usage/bridge data of its own.
+ */
+export function selectVisibleUsageVendors(
+  entries: ReadonlyMap<string, UsageEntry>,
+  activeProviderIds: readonly string[],
+): string[] {
+  const activeSet = new Set(activeProviderIds.filter(Boolean));
+  const candidates = new Set<string>(activeSet);
+  for (const id of entries.keys()) {
+    candidates.add(id);
+  }
+
+  const visible: string[] = [];
+  for (const id of candidates) {
+    const entry = entries.get(id);
+    const hasOwnData =
+      activeSet.has(id) ||
+      entry?.status?.installed === true ||
+      entry?.limits?.fiveHour !== undefined ||
+      entry?.limits?.sevenDay !== undefined ||
+      (entry?.limits?.sevenDayActivity?.turns ?? 0) > 0 ||
+      (entry?.limits?.fiveHourActivity?.turns ?? 0) > 0;
+    if (hasOwnData) {
+      visible.push(id);
+    }
+  }
+
+  visible.sort((a, b) => {
+    const ia = CANONICAL_VENDOR_ORDER.indexOf(a);
+    const ib = CANONICAL_VENDOR_ORDER.indexOf(b);
+    if (ia !== -1 || ib !== -1) {
+      if (ia === -1) return 1;
+      if (ib === -1) return -1;
+      return ia - ib;
+    }
+    return a.localeCompare(b);
+  });
+
+  return visible;
 }

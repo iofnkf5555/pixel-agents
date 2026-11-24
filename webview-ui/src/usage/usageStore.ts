@@ -1,8 +1,8 @@
 /**
- * Each provider's usage bridge state and plan usage, as the server last sent
+ * Each vendor's usage bridge state and plan usage, as the server last sent
  * them (usageBridgeStatus, usageLimits), outside React like
  * office/contextGauge.ts: the Intro, Settings and the usage bars all read the
- * same entry (useUsageBridge).
+ * same entries (useUsageBridge / useAllUsageEntries) without mixing vendors.
  *
  * `seq` counts usageBridgeStatus ARRIVALS. A failed install re-reports the
  * value already held, so only an arrival settles a request: a click remembers
@@ -20,6 +20,7 @@ export interface UsageEntry {
 
 const EMPTY: UsageEntry = { seq: 0 };
 const entries = new Map<string, UsageEntry>();
+let entriesSnapshot: ReadonlyMap<string, UsageEntry> = new Map();
 const listeners = new Set<() => void>();
 
 /** Take a usage message (useExtensionMessages). Returns whether it was one,
@@ -49,6 +50,11 @@ export function usageEntry(providerId: string): UsageEntry {
   return entries.get(providerId) ?? EMPTY;
 }
 
+/** Referentially stable snapshot of every known vendor entry for useSyncExternalStore. */
+export function usageEntriesSnapshot(): ReadonlyMap<string, UsageEntry> {
+  return entriesSnapshot;
+}
+
 /** The provider whose usage the office shows: the first the server reported a
  *  bridge status for (it reports them in registration order), or undefined
  *  before any arrives. */
@@ -69,10 +75,12 @@ export function subscribeUsage(listener: () => void): () => void {
 
 function update(providerId: string, entry: UsageEntry): void {
   entries.set(providerId, entry);
+  entriesSnapshot = new Map(entries);
   for (const l of listeners) l();
 }
 
 /** Tests only: forget every entry. */
 export function resetUsageStoreForTests(): void {
   entries.clear();
+  entriesSnapshot = new Map();
 }

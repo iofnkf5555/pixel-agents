@@ -2,11 +2,14 @@ import { describe, expect, it } from 'vitest';
 
 import { USAGE_HEART_MAX_BPM } from '../src/constants.js';
 import {
+  formatCompactTokens,
   formatDuration,
   freshnessLabel,
   heartBeatPeriodSec,
+  selectVisibleUsageVendors,
   usageBarView,
 } from '../src/usage/usageBarView.js';
+import type { UsageEntry } from '../src/usage/usageStore.js';
 
 const NOW = 1_800_000_000_000; // ms
 const inMs = (ms: number) => (NOW + ms) / 1000; // a resetsAt (seconds) ms from now
@@ -84,5 +87,64 @@ describe('freshnessLabel', () => {
     expect(freshnessLabel(undefined, NOW, 'Claude Code')).toBe(
       'Updates once a Claude Code session replies',
     );
+  });
+});
+
+describe('formatCompactTokens', () => {
+  it.each([
+    [0, '0'],
+    [850, '850'],
+    [12_400, '12.4K'],
+    [320_316, '320K'],
+    [4_906_685, '4.9M'],
+    [1_250_000_000, '1.3B'],
+  ])('%i → %s', (tokens, expected) => {
+    expect(formatCompactTokens(tokens)).toBe(expected);
+  });
+});
+
+describe('selectVisibleUsageVendors', () => {
+  it('orders visible vendors canonically without mixing or leaking empty inactive vendors', () => {
+    const map = new Map<string, UsageEntry>([
+      [
+        'claude',
+        {
+          seq: 1,
+          status: {
+            type: 'usageBridgeStatus',
+            providerId: 'claude',
+            providerName: 'Claude Code',
+            installed: false,
+            disclosure: '',
+          },
+          limits: { type: 'usageLimits', providerId: 'claude' },
+        },
+      ],
+      [
+        'antigravity',
+        {
+          seq: 0,
+          limits: {
+            type: 'usageLimits',
+            providerId: 'antigravity',
+            sevenDayActivity: { tokens: 500, inputTokens: 400, outputTokens: 100, turns: 1 },
+          },
+        },
+      ],
+      [
+        'codex',
+        {
+          seq: 0,
+          limits: {
+            type: 'usageLimits',
+            providerId: 'codex',
+            fiveHour: { usedPercentage: 18, resetsAt: 1_900_000_000 },
+          },
+        },
+      ],
+    ]);
+
+    expect(selectVisibleUsageVendors(map, [])).toEqual(['codex', 'antigravity']);
+    expect(selectVisibleUsageVendors(map, ['claude'])).toEqual(['codex', 'claude', 'antigravity']);
   });
 });

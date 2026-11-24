@@ -14,6 +14,7 @@ import {
   awaitingAnswer,
   handleUsageMessage,
   resetUsageStoreForTests,
+  usageEntriesSnapshot,
   usageEntry,
 } from '../src/usage/usageStore.js';
 
@@ -69,4 +70,21 @@ test('a request is pending until the next status arrives, even an equal one', ()
   assert.equal(awaitingAnswer(usageEntry('claude'), sentAt), true);
   handleUsageMessage(status(false, 'nope'));
   assert.equal(awaitingAnswer(usageEntry('claude'), sentAt), false);
+});
+
+test('usageEntriesSnapshot stays referentially stable until an entry updates and isolates vendors', () => {
+  const s0 = usageEntriesSnapshot();
+  assert.equal(s0, usageEntriesSnapshot());
+
+  handleUsageMessage({
+    type: 'usageLimits',
+    providerId: 'codex',
+    fiveHour: { usedPercentage: 18, resetsAt: 1_900_000_000 },
+    planType: 'plus',
+  });
+  const s1 = usageEntriesSnapshot();
+  assert.notEqual(s1, s0);
+  assert.equal(s1, usageEntriesSnapshot());
+  assert.equal(s1.get('codex')?.limits?.fiveHour?.usedPercentage, 18);
+  assert.equal(s1.get('claude'), undefined);
 });

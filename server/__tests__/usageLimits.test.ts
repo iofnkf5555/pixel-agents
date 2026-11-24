@@ -11,6 +11,7 @@ vi.mock('os', async () => {
 });
 
 const {
+  recordProviderUsageLimits,
   recordUsageReport,
   usageLimitsMessage,
   usageSnapshotMessages,
@@ -151,5 +152,71 @@ describe('recordUsageReport', () => {
       },
       usageLimitsMessage('claude'),
     ]);
+  });
+
+  it('keeps vendors isolated, blocks stale quota overwrites, preserves quota alongside activity, and includes extra vendors in snapshots', () => {
+    expect(
+      recordProviderUsageLimits(
+        'codex',
+        {
+          planType: 'plus',
+          fiveHour: { usedPercentage: 20, resetsAt: 1_900_000_000 },
+          sevenDay: { usedPercentage: 55, resetsAt: 1_900_500_000 },
+        },
+        5000,
+      ),
+    ).toBe(true);
+
+    // Older timestamp must not overwrite newer Codex quota
+    expect(
+      recordProviderUsageLimits(
+        'codex',
+        {
+          fiveHour: { usedPercentage: 99, resetsAt: 1_800_000_000 },
+        },
+        4000,
+      ),
+    ).toBe(false);
+    expect(usageLimitsMessage('codex').fiveHour?.usedPercentage).toBe(20);
+
+    // Adding Antigravity activity never touches Codex or Claude
+    expect(
+      recordProviderUsageLimits(
+        'antigravity',
+        {
+          fiveHourActivity: { tokens: 1500, inputTokens: 1200, outputTokens: 300, turns: 2 },
+          sevenDayActivity: { tokens: 8000, inputTokens: 6500, outputTokens: 1500, turns: 12 },
+        },
+        6000,
+      ),
+    ).toBe(true);
+    expect(usageLimitsMessage('codex').sevenDayActivity).toBeUndefined();
+    expect(usageLimitsMessage('antigravity').fiveHour).toBeUndefined();
+    expect(usageLimitsMessage('claude')).toEqual({ type: 'usageLimits', providerId: 'claude' });
+
+    // Activity update for Claude preserves existing Claude official quota
+    recordUsageReport(claudeProvider, report(12, 34), 7000);
+    expect(
+      recordProviderUsageLimits(
+        'claude',
+        {
+          fiveHourActivity: { tokens: 900, inputTokens: 700, outputTokens: 200, turns: 1 },
+          sevenDayActivity: { tokens: 900, inputTokens: 700, outputTokens: 200, turns: 1 },
+        },
+        8000,
+      ),
+    ).toBe(true);
+    expect(usageLimitsMessage('claude')).toMatchObject({
+      fiveHour: { usedPercentage: 12 },
+      sevenDay: { usedPercentage: 34 },
+      fiveHourActivity: { tokens: 900, turns: 1 },
+    });
+
+    const snap = usageSnapshotMessages();
+    expect(
+      snap.map((m) =>
+        m.type === 'usageLimits' ? `limits:${m.providerId}` : `status:${m.providerId}`,
+      ),
+    ).toEqual(['status:claude', 'limits:claude', 'limits:codex', 'limits:antigravity']);
   });
 });

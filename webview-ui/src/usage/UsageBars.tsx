@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
-import type { UsageLimits } from '../../../core/src/messages.js';
+import type { LocalWindowActivity, UsageLimits } from '../../../core/src/messages.js';
+import { getProviderBadge, type ProviderBadgeInfo } from '../components/providerBadge.js';
 import { PixelText } from '../components/ui/PixelText.js';
 import {
   CONTEXT_GAUGE_COLOR_YELLOW,
@@ -11,17 +12,20 @@ import {
 } from '../constants.js';
 import { PixelHeart } from './PixelHeart.js';
 import {
+  formatCompactTokens,
   freshnessLabel,
   heartBeatPeriodSec,
+  selectVisibleUsageVendors,
   type UsageBarView,
   usageBarView,
 } from './usageBarView.js';
+import type { UsageEntry } from './usageStore.js';
 
 type BarId = 'weekly' | 'fiveHour';
 
 /** Fill colour per bar and level. The two bars differ all the way down,
- *  like a game's health and stamina: weekly green → yellow → red, 5-hour
- *  blue → purple → red (yellow at half would make them look alike). */
+ *  like a game's health and stamina: weekly green -> yellow -> red, 5-hour
+ *  blue -> purple -> red (yellow at half would make them look alike). */
 const FILL: Record<BarId, Record<UsageBarView['level'], string>> = {
   weekly: {
     ok: 'var(--color-status-success)',
@@ -36,8 +40,15 @@ const FILL: Record<BarId, Record<UsageBarView['level'], string>> = {
     unknown: 'transparent',
   },
 };
-/** Each bar's name, before its reset time on hover. */
+const BAR_PREFIX: Record<BarId, string> = { weekly: 'W', fiveHour: '5h' };
 const BAR_NAME: Record<BarId, string> = { weekly: 'Weekly', fiveHour: '5-hour' };
+const METERED_WINDOW_TAG: Record<BarId, string> = { weekly: '7d 實測', fiveHour: '5h 實測' };
+
+const VENDOR_DISPLAY_NAMES: Record<string, string> = {
+  codex: 'Codex',
+  claude: 'Claude Code',
+  antigravity: 'Antigravity',
+};
 
 interface UsageBarsProps {
   /** The last usageLimits for the provider; undefined until the server sends it. */
@@ -45,6 +56,12 @@ interface UsageBarsProps {
   /** Whose plan it is, for people (usageBridgeStatus.providerName). */
   providerName: string;
   /** Phone: below the safe area, beside the menu button. */
+  mobile: boolean;
+}
+
+interface VendorUsageStackProps {
+  entries: ReadonlyMap<string, UsageEntry>;
+  agentProviders: Record<number, string>;
   mobile: boolean;
 }
 
@@ -58,50 +75,135 @@ function useNow(intervalMs: number): number {
   return now;
 }
 
-/** A bar's name and when it resets: "Weekly · resets in 3d 11h". */
-function ResetLabel({ id, view }: { id: BarId; view: UsageBarView }) {
-  return (
-    <PixelText text={`${BAR_NAME[id]} · ${view.reset}`} shadow className="text-2xs text-text" />
-  );
+function barHoverText(
+  id: BarId,
+  providerLabel: string,
+  view: UsageBarView,
+  activity: LocalWindowActivity | undefined,
+  hasOfficialWindow: boolean,
+): string {
+  if (!hasOfficialWindow && activity && activity.turns > 0) {
+    return `${providerLabel} · ${BAR_NAME[id]} (${METERED_WINDOW_TAG[id]}) · ${formatCompactTokens(activity.tokens)} tok · ${activity.turns} turns`;
+  }
+  return `${providerLabel} · ${BAR_NAME[id]} · ${view.reset}`;
 }
 
-/** One bar with its share left printed inside, and (while the section is
- *  hovered or tapped) when it resets, just right of it. */
-function BarRow({ id, view, showReset }: { id: BarId; view: UsageBarView; showReset: boolean }) {
+/** Single horizontal bar: renders either an official remaining % quota meter or a
+ *  metered local 7d/5h token bar (never inventing a quota % where none exists). */
+function BarRow({
+  id,
+  view,
+  hasOfficialWindow,
+  activity,
+  badge,
+  providerLabel,
+  showReset,
+}: {
+  id: BarId;
+  view: UsageBarView;
+  hasOfficialWindow: boolean;
+  activity: LocalWindowActivity | undefined;
+  badge: ProviderBadgeInfo;
+  providerLabel: string;
+  showReset: boolean;
+}) {
+  const isMetered = !hasOfficialWindow && activity !== undefined && activity.turns > 0;
+  const barText = hasOfficialWindow
+    ? `${BAR_PREFIX[id]} ${view.percent}`
+    : isMetered
+      ? `${BAR_PREFIX[id]} ${formatCompactTokens(activity.tokens)}`
+      : `${BAR_PREFIX[id]} --`;
+
+  const meterProps =
+    hasOfficialWindow && view.remaining !== null
+      ? {
+          role: 'meter' as const,
+          'aria-valuemin': 0,
+          'aria-valuemax': 100,
+          'aria-valuenow': Math.round(view.remaining * 100),
+          'aria-label': `${providerLabel} ${BAR_NAME[id]} remaining ${view.percent}, ${view.reset}`,
+        }
+      : {
+          role: 'meter' as const,
+          'aria-label': isMetered
+            ? `${providerLabel} ${BAR_NAME[id]} local tokens ${formatCompactTokens(activity.tokens)} over ${activity.turns} turns`
+            : `${providerLabel} ${BAR_NAME[id]} no data yet`,
+        };
+
   return (
     <div className="flex items-center gap-4">
       <div
-        className="relative bg-bg-dark border-2 border-border box-content flex items-center pl-4"
+        {...meterProps}
+        className="relative bg-bg-dark border-2 border-border box-content flex items-center pl-4 overflow-hidden"
         style={{ width: USAGE_BAR_WIDTH_PX, height: USAGE_BAR_HEIGHT_PX }}
       >
-        <div
-          className="absolute left-0 top-0 bottom-0"
-          style={{
-            width: `${(view.remaining ?? 0) * 100}%`,
-            background: FILL[id][view.level],
-          }}
-        />
-        <PixelText text={view.percent} shadow className="relative text-2xs text-text" />
+        {hasOfficialWindow ? (
+          <div
+            className="absolute left-0 top-0 bottom-0"
+            style={{
+              width: `${(view.remaining ?? 0) * 100}%`,
+              background: FILL[id][view.level],
+            }}
+          />
+        ) : isMetered ? (
+          <div
+            className="absolute left-0 top-0 bottom-0"
+            style={{ width: 3, background: badge.bg }}
+          />
+        ) : null}
+        <PixelText text={barText} shadow className="relative text-2xs text-text" />
       </div>
-      {showReset && <ResetLabel id={id} view={view} />}
+      {showReset && (
+        <PixelText
+          text={barHoverText(id, providerLabel, view, activity, hasOfficialWindow)}
+          shadow
+          className="text-2xs text-text whitespace-nowrap"
+        />
+      )}
     </div>
   );
 }
 
-/**
- * Top-left of the office: how much of the provider's plan is left (`providerName`, e.g. Claude Code). A heart,
- * then the weekly bar (green) over the 5-hour bar (blue), equal in size, each
- * draining through its own colours to red,
- * each with its share left inside. Hovering any of it makes the heart beat, at a
- * pace proportional to the weekly plan left, and shows when each bar resets,
- * right of it. On a phone a tap does it instead (a tap elsewhere undoes it),
- * with the reset times below the bars, where the narrow screen has room.
- */
-export function UsageBars({ limits, providerName, mobile }: UsageBarsProps) {
-  const now = useNow(USAGE_BAR_TICK_MS);
+function buildVendorTooltip(
+  providerDisplayName: string,
+  limits: UsageLimits | undefined,
+  now: number,
+  hasOfficialQuota: boolean,
+): string {
+  const planSuffix = limits?.planType ? ` (${limits.planType})` : '';
+  if (hasOfficialQuota) {
+    return `${providerDisplayName}${planSuffix} · ${freshnessLabel(limits?.updatedAt, now, providerDisplayName)}`;
+  }
+  const a7 = limits?.sevenDayActivity;
+  const a5 = limits?.fiveHourActivity;
+  if ((a7 && a7.turns > 0) || (a5 && a5.turns > 0)) {
+    const cache7 = formatCompactTokens(a7?.cacheReadTokens ?? 0);
+    const cache5 = formatCompactTokens(a5?.cacheReadTokens ?? 0);
+    return `${providerDisplayName}：未公開官方 % 配額，改顯示本機 7d / 5h 非快取 Token 實測（7d cache read: ${cache7} · 5h cache read: ${cache5}）`;
+  }
+  return `${providerDisplayName}：${freshnessLabel(limits?.updatedAt, now, providerDisplayName)}`;
+}
+
+interface VendorUsageRowProps {
+  providerId: string;
+  providerName: string;
+  limits: UsageLimits | undefined;
+  now: number;
+  mobile: boolean;
+  showBadge?: boolean;
+}
+
+function VendorUsageRow({
+  providerId,
+  providerName,
+  limits,
+  now,
+  mobile,
+  showBadge = true,
+}: VendorUsageRowProps) {
   const [active, setActive] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
-  // Phone: a tap anywhere else closes it again.
+
   useEffect(() => {
     if (!mobile || !active) return;
     const close = (e: PointerEvent) => {
@@ -110,35 +212,159 @@ export function UsageBars({ limits, providerName, mobile }: UsageBarsProps) {
     document.addEventListener('pointerdown', close, true);
     return () => document.removeEventListener('pointerdown', close, true);
   }, [mobile, active]);
+
+  const badge = getProviderBadge(providerId);
   const weekly = usageBarView(limits?.sevenDay, now);
   const fiveHour = usageBarView(limits?.fiveHour, now);
-  // Reset times: right of each bar on a desktop, below the bars on a phone.
+  const hasWeeklyQuota = limits?.sevenDay !== undefined;
+  const hasFiveHourQuota = limits?.fiveHour !== undefined;
+  const hasAnyOfficialQuota = hasWeeklyQuota || hasFiveHourQuota;
+  const planLabel = limits?.planType ? `${providerName} (${limits.planType})` : providerName;
   const showResetBeside = active && !mobile;
 
   return (
     <div
       ref={rootRef}
-      className={`absolute z-10 flex items-center gap-8 cursor-default ${mobile ? 'mobile-safe-top' : 'top-8'}`}
-      style={{ left: USAGE_BARS_LEFT_PX }}
-      title={freshnessLabel(limits?.updatedAt, now, providerName)}
-      aria-label={`${providerName} usage. Weekly: ${weekly.percent} left, ${weekly.reset}. 5-hour: ${fiveHour.percent} left, ${fiveHour.reset}.`}
-      // A phone's tap also fires the emulated mouseenter, which would cancel
-      // the click's toggle, so there only the tap counts.
+      className="relative flex items-center gap-6 cursor-default"
+      title={buildVendorTooltip(providerName, limits, now, hasAnyOfficialQuota)}
+      aria-label={`${planLabel} usage. Weekly: ${
+        hasWeeklyQuota
+          ? `${weekly.percent} left, ${weekly.reset}`
+          : limits?.sevenDayActivity && limits.sevenDayActivity.turns > 0
+            ? `${formatCompactTokens(limits.sevenDayActivity.tokens)} tokens`
+            : 'no data yet'
+      }. 5-hour: ${
+        hasFiveHourQuota
+          ? `${fiveHour.percent} left, ${fiveHour.reset}`
+          : limits?.fiveHourActivity && limits.fiveHourActivity.turns > 0
+            ? `${formatCompactTokens(limits.fiveHourActivity.tokens)} tokens`
+            : 'no data yet'
+      }.`}
       onMouseEnter={mobile ? undefined : () => setActive(true)}
       onMouseLeave={mobile ? undefined : () => setActive(false)}
       onClick={mobile ? () => setActive((a) => !a) : undefined}
     >
-      <PixelHeart periodSec={active ? heartBeatPeriodSec(weekly.remaining) : null} />
+      {showBadge && (
+        <span
+          className="px-4 py-2 text-2xs leading-none w-34 text-center border border-border shrink-0"
+          style={{ background: badge.bg, color: badge.text }}
+        >
+          {badge.short}
+        </span>
+      )}
+      <PixelHeart
+        periodSec={active && hasWeeklyQuota ? heartBeatPeriodSec(weekly.remaining) : null}
+      />
       <div className="flex flex-col gap-2">
-        <BarRow id="weekly" view={weekly} showReset={showResetBeside} />
-        <BarRow id="fiveHour" view={fiveHour} showReset={showResetBeside} />
+        <BarRow
+          id="weekly"
+          view={weekly}
+          hasOfficialWindow={hasWeeklyQuota}
+          activity={limits?.sevenDayActivity}
+          badge={badge}
+          providerLabel={planLabel}
+          showReset={showResetBeside}
+        />
+        <BarRow
+          id="fiveHour"
+          view={fiveHour}
+          hasOfficialWindow={hasFiveHourQuota}
+          activity={limits?.fiveHourActivity}
+          badge={badge}
+          providerLabel={planLabel}
+          showReset={showResetBeside}
+        />
       </div>
       {active && mobile && (
-        <div className="absolute top-full left-0 mt-6 flex flex-col gap-4 pointer-events-none">
-          <ResetLabel id="weekly" view={weekly} />
-          <ResetLabel id="fiveHour" view={fiveHour} />
+        <div className="mt-2 ml-4 flex flex-col gap-2 pointer-events-none">
+          <PixelText
+            text={barHoverText(
+              'weekly',
+              planLabel,
+              weekly,
+              limits?.sevenDayActivity,
+              hasWeeklyQuota,
+            )}
+            shadow
+            className="text-2xs text-text whitespace-nowrap"
+          />
+          <PixelText
+            text={barHoverText(
+              'fiveHour',
+              planLabel,
+              fiveHour,
+              limits?.fiveHourActivity,
+              hasFiveHourQuota,
+            )}
+            shadow
+            className="text-2xs text-text whitespace-nowrap"
+          />
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Top-left stack of strictly isolated per-vendor usage bars (`Codex`, `Claude Code`, `Antigravity`).
+ * Never mixes usage values across vendors.
+ */
+export function VendorUsageStack({ entries, agentProviders, mobile }: VendorUsageStackProps) {
+  const now = useNow(USAGE_BAR_TICK_MS);
+  const activeProviders = useMemo(() => Object.values(agentProviders), [agentProviders]);
+  const visibleVendors = useMemo(
+    () => selectVisibleUsageVendors(entries, activeProviders),
+    [entries, activeProviders],
+  );
+
+  if (visibleVendors.length === 0) return null;
+
+  return (
+    <div
+      data-testid="vendor-usage-stack"
+      className={`absolute z-10 flex flex-col gap-6 ${mobile ? 'mobile-safe-top' : 'top-8'}`}
+      style={{ left: USAGE_BARS_LEFT_PX }}
+    >
+      {visibleVendors.map((vendorId) => {
+        const entry = entries.get(vendorId);
+        const providerName =
+          entry?.status?.providerName ??
+          VENDOR_DISPLAY_NAMES[vendorId] ??
+          getProviderBadge(vendorId).label;
+        return (
+          <VendorUsageRow
+            key={vendorId}
+            providerId={vendorId}
+            providerName={providerName}
+            limits={entry?.limits}
+            now={now}
+            mobile={mobile}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * Single-vendor usage bars wrapper preserved for standalone callers.
+ */
+export function UsageBars({ limits, providerName, mobile }: UsageBarsProps) {
+  const now = useNow(USAGE_BAR_TICK_MS);
+  const providerId = limits?.providerId ?? 'claude';
+  return (
+    <div
+      className={`absolute z-10 ${mobile ? 'mobile-safe-top' : 'top-8'}`}
+      style={{ left: USAGE_BARS_LEFT_PX }}
+    >
+      <VendorUsageRow
+        providerId={providerId}
+        providerName={providerName}
+        limits={limits}
+        now={now}
+        mobile={mobile}
+        showBadge={false}
+      />
     </div>
   );
 }

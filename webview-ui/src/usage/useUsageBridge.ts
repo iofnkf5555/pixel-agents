@@ -2,7 +2,14 @@ import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 
 import type { UsageBridgeStatus, UsageLimits } from '../../../core/src/messages.js';
 import { transport } from '../transport/index.js';
-import { awaitingAnswer, subscribeUsage, usageEntry, usageProviderId } from './usageStore.js';
+import {
+  awaitingAnswer,
+  subscribeUsage,
+  usageEntriesSnapshot,
+  type UsageEntry,
+  usageEntry,
+  usageProviderId,
+} from './usageStore.js';
 
 export interface UsageBridge {
   /** Install state; undefined until the server says (and forever on a host
@@ -14,6 +21,13 @@ export interface UsageBridge {
   pending: boolean;
   /** Install or remove the bridge; pending until the next status arrives. */
   setEnabled: (enabled: boolean) => void;
+}
+
+/**
+ * Subscribe to all per-vendor usage entries keyed strictly by providerId.
+ */
+export function useAllUsageEntries(): ReadonlyMap<string, UsageEntry> {
+  return useSyncExternalStore(subscribeUsage, usageEntriesSnapshot);
 }
 
 /**

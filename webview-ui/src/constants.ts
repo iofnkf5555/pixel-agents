@@ -877,3 +877,10 @@ export const MUSIC_VERSION_GAP_PX = 6;
 export const VERSION_LABEL_BOTTOM_PX = 10;
 /** The update notice / changelog tooltip, this far above the label's spot. */
 export const VERSION_NOTICE_ABOVE_PX = 34;
+
+// ── Provider Badges ─────────────────────────────────────────
+export const PROVIDER_BADGE_COLORS = {
+  claude: { bg: '#d97706', text: '#ffffff' },
+  codex: { bg: '#10a37f', text: '#ffffff' },
+  antigravity: { bg: '#7c3aed', text: '#ffffff' },
+} as const;
