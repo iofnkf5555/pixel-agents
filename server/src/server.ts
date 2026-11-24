@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+import type { AgentChatBridge } from './agentChatBridge.js';
 import type { AgentRuntime } from './agentRuntime.js';
 import type { AgentStateStore } from './agentStateStore.js';
 import type {
@@ -17,6 +18,8 @@ import {
   SERVER_REGISTRY_PROTOCOL_VERSION,
   SERVERS_DIR,
 } from './constants.js';
+import type { CrossVendorReviewService } from './crossVendorReview.js';
+import type { ArchiveBookEntry, ExternalProviderId } from './externalLogWatcher.js';
 import { createHttpServer } from './httpServer.js';
 import type { ServerConfig, StandaloneAccess } from './serverConfig.js';
 import { isServerConfig, isServerTarget, sameStandaloneAccess } from './serverConfig.js';
@@ -81,6 +84,17 @@ export class PixelAgentsServer {
      *  the old one. Refused while another standalone server is running: it
      *  would keep honouring the old token until it restarts. */
     rotateToken?: boolean;
+    /** Return read-only archive entries for the Bookshelf UI. */
+    getArchive?: () => ArchiveBookEntry[];
+    /** Pin/summon an archived session onto the office floor. */
+    onPinArchiveSession?: (
+      providerId: ExternalProviderId,
+      id: string,
+    ) => { ok: boolean; agentId?: number };
+    /** Direct communication bridge for Leads and standalone main sessions. */
+    chatBridge?: AgentChatBridge;
+    /** Read-only cross-vendor reviewer coordinator (Codex <-> Antigravity). */
+    reviewService?: CrossVendorReviewService;
   }): Promise<ServerConfig> {
     const embedded = options?.embedded ?? true;
     const wantsSpa = !embedded;
@@ -147,6 +161,10 @@ export class PixelAgentsServer {
       ptyManager: options?.ptyManager,
       packageRoot: options?.packageRoot,
       allowedHosts: standalone?.allowedHosts,
+      getArchive: options?.getArchive,
+      onPinArchiveSession: options?.onPinArchiveSession,
+      chatBridge: options?.chatBridge,
+      reviewService: options?.reviewService,
     });
 
     this.app = app;

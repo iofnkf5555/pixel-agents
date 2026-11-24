@@ -4,6 +4,7 @@ import fastifyWebsocket from '@fastify/websocket';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import Fastify from 'fastify';
 
+import type { AgentChatBridge } from './agentChatBridge.js';
 import { agentCreatedMessage } from './agentMessages.js';
 import type { AgentRuntime } from './agentRuntime.js';
 import type { AgentStateStore } from './agentStateStore.js';
@@ -21,11 +22,14 @@ import {
   WS_CLOSE_UNAUTHORIZED,
 } from './constants.js';
 import { applyReportedContext } from './contextUsage.js';
+import type { CrossVendorReviewService, ReviewVendor } from './crossVendorReview.js';
+import type { ArchiveBookEntry, ExternalProviderId } from './externalLogWatcher.js';
 import { hookProviderById } from './providers/index.js';
 import { registerTerminalRoutes } from './terminal/terminalRoutes.js';
 import type { TerminalSessions } from './terminal/terminalSessions.js';
 import type { AgentState } from './types.js';
 import {
+  allUsageLimits,
   PRIVILEGED_BROADCAST_TYPES,
   recordUsageReport,
   usageLimitsMessage,
@@ -36,6 +40,7 @@ import {
   privilegedHostnames,
   redactTokenQuery,
   standaloneHandshakeVerdict,
+  standaloneTokenValid,
 } from './wsAuth.js';
 
 /** Options for creating the HTTP + WebSocket server. */
@@ -72,6 +77,17 @@ export interface HttpServerOptions {
    *  privileged standalone handshake may arrive under -- e.g. a reverse proxy's
    *  public name. See wsAuth.privilegedHostnames. */
   allowedHosts?: readonly string[];
+  /** Return read-only archive entries (Codex, Antigravity, Claude) for the Bookshelf UI. */
+  getArchive?: () => ArchiveBookEntry[];
+  /** Summon an archived Codex/Antigravity session onto the office floor. */
+  onPinArchiveSession?: (
+    providerId: ExternalProviderId,
+    id: string,
+  ) => { ok: boolean; agentId?: number };
+  /** Direct communication bridge for Leads and standalone main sessions. */
+  chatBridge?: AgentChatBridge;
+  /** Read-only cross-vendor reviewer coordinator (Codex <-> Antigravity). */
+  reviewService?: CrossVendorReviewService;
 }
 
 /** Result of createHttpServer(). */
@@ -120,7 +136,10 @@ export async function createHttpServer(options: HttpServerOptions): Promise<Http
 
   registerHealthRoute(app);
   registerHookRoute(app, options);
-  registerUsageRoute(app, options);
+  registerUsageRoute(app, options, allowedHostnames);
+  registerArchiveRoutes(app, options);
+  registerChatRoutes(app, options, allowedHostnames);
+  registerReviewRoutes(app, options, allowedHostnames);
   registerWebSocketRoute(app, options, allowedHostnames);
   registerTerminalRoutes(app, {
     token: options.token,
@@ -145,6 +164,286 @@ function registerHealthRoute(app: FastifyInstance): void {
     uptime: Math.floor((Date.now() - startTime) / 1000),
     pid: process.pid,
   }));
+}
+
+// ── Bookshelf Archive ──────────────────────────────────────────
+
+function requestTokenAuthorized(request: FastifyRequest, expectedToken: string): boolean {
+  return (
+    bearerTokenValid(request.headers.authorization, expectedToken) ||
+    standaloneTokenValid(request.url, expectedToken)
+  );
+}
+
+function registerArchiveRoutes(app: FastifyInstance, options: HttpServerOptions): void {
+  app.get('/api/archive', async (request, reply) => {
+    if (!requestTokenAuthorized(request, options.token)) {
+      reply.code(401).send({ error: 'unauthorized' });
+      return;
+    }
+    const books = options.getArchive ? options.getArchive() : [];
+    reply.send({ books, generatedAt: Date.now() });
+  });
+
+  app.post<{ Body: Record<string, unknown> }>('/api/archive/pin', async (request, reply) => {
+    if (!requestTokenAuthorized(request, options.token)) {
+      reply.code(401).send({ error: 'unauthorized' });
+      return;
+    }
+    const body = request.body;
+    const providerId = body && typeof body === 'object' ? body.providerId : undefined;
+    const id = body && typeof body === 'object' ? body.id : undefined;
+    if ((providerId !== 'codex' && providerId !== 'antigravity') || typeof id !== 'string' || !id) {
+      reply.code(400).send({ ok: false, error: 'invalid_request' });
+      return;
+    }
+    const result = options.onPinArchiveSession
+      ? options.onPinArchiveSession(providerId, id)
+      : { ok: false };
+    if (!result.ok) {
+      reply.code(404).send(result);
+      return;
+    }
+    reply.send(result);
+  });
+}
+
+// ── Agent Chat (Leads & Solo sessions only) ──────────────────────
+
+function chatAuthError(
+  request: FastifyRequest,
+  options: HttpServerOptions,
+  allowedHostnames: ReadonlySet<string>,
+): { code: number; error: string } | null {
+  if (options.embedded) {
+    if (!bearerTokenValid(request.headers.authorization, options.token)) {
+      return { code: 401, error: 'unauthorized' };
+    }
+    return null;
+  }
+  if (!isAllowedWebSocketOrigin(request.headers.origin, request.headers.host)) {
+    return { code: 403, error: 'forbidden_origin' };
+  }
+  if (bearerTokenValid(request.headers.authorization, options.token)) {
+    return null;
+  }
+  const verdict = standaloneHandshakeVerdict(
+    request.url,
+    request.headers.host,
+    options.token,
+    allowedHostnames,
+  );
+  if (verdict === 'bad-token') {
+    return { code: 401, error: 'unauthorized' };
+  }
+  if (verdict === 'untrusted-host') {
+    return { code: 403, error: 'untrusted_host' };
+  }
+  return null;
+}
+
+function registerChatRoutes(
+  app: FastifyInstance,
+  options: HttpServerOptions,
+  allowedHostnames: ReadonlySet<string>,
+): void {
+  app.get('/api/chat/targets', async (request, reply) => {
+    const authErr = chatAuthError(request, options, allowedHostnames);
+    if (authErr) {
+      reply.code(authErr.code).send({ error: authErr.error });
+      return;
+    }
+    const targets = options.chatBridge ? options.chatBridge.getTargets() : {};
+    reply.send({ targets });
+  });
+
+  app.get<{ Params: { id: string } }>(
+    '/api/agents/:id/messages',
+    {
+      schema: {
+        params: {
+          type: 'object',
+          properties: { id: { type: 'string', pattern: '^[0-9]+$' } },
+          required: ['id'],
+        },
+      },
+    },
+    async (request, reply) => {
+      const authErr = chatAuthError(request, options, allowedHostnames);
+      if (authErr) {
+        reply.code(authErr.code).send({ ok: false, error: authErr.error });
+        return;
+      }
+      if (!options.chatBridge) {
+        reply.code(503).send({ ok: false, error: 'chat_unavailable' });
+        return;
+      }
+      const agentId = Number(request.params.id);
+      const res = options.chatBridge.getMessages(agentId);
+      if (!res.ok) {
+        reply.code(res.statusCode ?? 400).send(res);
+        return;
+      }
+      reply.send(res);
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>(
+    '/api/agents/:id/message',
+    {
+      schema: {
+        params: {
+          type: 'object',
+          properties: { id: { type: 'string', pattern: '^[0-9]+$' } },
+          required: ['id'],
+        },
+      },
+    },
+    async (request, reply) => {
+      const authErr = chatAuthError(request, options, allowedHostnames);
+      if (authErr) {
+        reply.code(authErr.code).send({ ok: false, error: authErr.error });
+        return;
+      }
+      if (!options.chatBridge) {
+        reply.code(503).send({ ok: false, error: 'chat_unavailable' });
+        return;
+      }
+      const body = request.body;
+      const text = body && typeof body === 'object' ? body.text : undefined;
+      if (typeof text !== 'string' || !text.trim()) {
+        reply.code(400).send({ ok: false, error: 'invalid_message' });
+        return;
+      }
+      const agentId = Number(request.params.id);
+      const res = await options.chatBridge.sendMessage(agentId, text);
+      if (!res.ok) {
+        reply.code(res.statusCode ?? 400).send(res);
+        return;
+      }
+      reply.send(res);
+    },
+  );
+}
+
+// ── Cross-Vendor Peer Review Routes ────────────────────────────
+
+function registerReviewRoutes(
+  app: FastifyInstance,
+  options: HttpServerOptions,
+  allowedHostnames: ReadonlySet<string>,
+): void {
+  app.get<{ Querystring: { hostAgentId?: string } }>('/api/reviews', async (request, reply) => {
+    const authErr = chatAuthError(request, options, allowedHostnames);
+    if (authErr) {
+      reply.code(authErr.code).send({ ok: false, error: authErr.error });
+      return;
+    }
+    const rawHost = request.query?.hostAgentId;
+    let hostAgentId: number | undefined;
+    if (rawHost !== undefined && rawHost !== '') {
+      if (!/^[0-9]+$/.test(rawHost)) {
+        reply.code(400).send({ ok: false, error: 'invalid_host_agent' });
+        return;
+      }
+      hostAgentId = Number(rawHost);
+    }
+    const reviews = options.reviewService ? options.reviewService.listReviews(hostAgentId) : [];
+    reply.send({ ok: true, reviews });
+  });
+
+  app.post<{ Body: Record<string, unknown> }>('/api/reviews/invite', async (request, reply) => {
+    const authErr = chatAuthError(request, options, allowedHostnames);
+    if (authErr) {
+      reply.code(authErr.code).send({ ok: false, error: authErr.error });
+      return;
+    }
+    if (!options.reviewService) {
+      reply.code(503).send({ ok: false, error: 'review_unavailable' });
+      return;
+    }
+    const body = request.body && typeof request.body === 'object' ? request.body : {};
+    const hostAgentId = body.hostAgentId;
+    if (typeof hostAgentId !== 'number' || !Number.isInteger(hostAgentId) || hostAgentId <= 0) {
+      reply.code(400).send({ ok: false, error: 'invalid_host_agent' });
+      return;
+    }
+    const rawVendor = body.reviewerVendor;
+    let reviewerVendor: ReviewVendor | undefined;
+    if (rawVendor !== undefined) {
+      if (rawVendor !== 'codex' && rawVendor !== 'antigravity') {
+        reply.code(400).send({ ok: false, error: 'invalid_reviewer_vendor' });
+        return;
+      }
+      reviewerVendor = rawVendor;
+    }
+    const focus = typeof body.focus === 'string' ? body.focus : undefined;
+    const previousReviewId =
+      typeof body.previousReviewId === 'string' &&
+      /^[A-Za-z0-9_-]{3,80}$/.test(body.previousReviewId)
+        ? body.previousReviewId
+        : undefined;
+
+    const res = await options.reviewService.inviteReview({
+      hostAgentId,
+      reviewerVendor,
+      focus,
+      previousReviewId,
+    });
+    reply.code(res.statusCode ?? (res.ok ? 202 : 400)).send(res);
+  });
+
+  app.post<{ Params: { reviewId: string } }>(
+    '/api/reviews/:reviewId/forward',
+    {
+      schema: {
+        params: {
+          type: 'object',
+          properties: { reviewId: { type: 'string', pattern: '^[A-Za-z0-9_-]{3,80}$' } },
+          required: ['reviewId'],
+        },
+      },
+    },
+    async (request, reply) => {
+      const authErr = chatAuthError(request, options, allowedHostnames);
+      if (authErr) {
+        reply.code(authErr.code).send({ ok: false, error: authErr.error });
+        return;
+      }
+      if (!options.reviewService) {
+        reply.code(503).send({ ok: false, error: 'review_unavailable' });
+        return;
+      }
+      const res = await options.reviewService.forwardReview(request.params.reviewId);
+      reply.code(res.statusCode ?? (res.ok ? 200 : 400)).send(res);
+    },
+  );
+
+  app.post<{ Params: { reviewId: string } }>(
+    '/api/reviews/:reviewId/dismiss',
+    {
+      schema: {
+        params: {
+          type: 'object',
+          properties: { reviewId: { type: 'string', pattern: '^[A-Za-z0-9_-]{3,80}$' } },
+          required: ['reviewId'],
+        },
+      },
+    },
+    async (request, reply) => {
+      const authErr = chatAuthError(request, options, allowedHostnames);
+      if (authErr) {
+        reply.code(authErr.code).send({ ok: false, error: authErr.error });
+        return;
+      }
+      if (!options.reviewService) {
+        reply.code(503).send({ ok: false, error: 'review_unavailable' });
+        return;
+      }
+      const res = options.reviewService.dismissReview(request.params.reviewId);
+      reply.code(res.statusCode ?? (res.ok ? 200 : 400)).send(res);
+    },
+  );
 }
 
 // ── Hook Events ────────────────────────────────────────────────
@@ -184,7 +483,20 @@ function registerHookRoute(app: FastifyInstance, options: HttpServerOptions): vo
 
 /** A provider's usage bridge reports the account's plan limits here. Stored,
  *  and passed on to the office when they moved (recordUsageReport). */
-function registerUsageRoute(app: FastifyInstance, options: HttpServerOptions): void {
+function registerUsageRoute(
+  app: FastifyInstance,
+  options: HttpServerOptions,
+  allowedHostnames: ReadonlySet<string>,
+): void {
+  app.get('/api/usage', async (request, reply) => {
+    const authErr = chatAuthError(request, options, allowedHostnames);
+    if (authErr) {
+      reply.code(authErr.code).send({ error: authErr.error });
+      return;
+    }
+    reply.send({ usage: allUsageLimits() });
+  });
+
   app.post<{ Params: { providerId: string }; Body: unknown }>(
     `${USAGE_API_PREFIX}/:providerId`,
     {

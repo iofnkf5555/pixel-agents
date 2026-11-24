@@ -10,6 +10,7 @@
 
 import * as path from 'path';
 
+import { AgentChatBridge } from './agentChatBridge.js';
 import { AgentRuntime } from './agentRuntime.js';
 import { AgentStateStore } from './agentStateStore.js';
 import {
@@ -33,6 +34,8 @@ import {
   TERMINAL_DISABLED_BY_FLAG_REASON,
   WILDCARD_HOSTNAMES,
 } from './constants.js';
+import { CrossVendorReviewService } from './crossVendorReview.js';
+import { DEFAULT_RECENT_WINDOW_MS, ExternalLogWatcher } from './externalLogWatcher.js';
 import { FileStateAdapter } from './fileStateAdapter.js';
 import {
   claudeProvider,
@@ -50,6 +53,7 @@ import { PtySessionManager } from './terminal/ptySessionManager.js';
 import { RemotePtySessions, startPtyHostProcess } from './terminal/remotePtySessions.js';
 import { reattachTerminalAgents } from './terminal/standaloneAgentLauncher.js';
 import type { TerminalSessions } from './terminal/terminalSessions.js';
+import { recordProviderUsageLimits, usageLimitsMessage } from './usageLimits.js';
 import { isLoopbackHost, normalizeHostname } from './wsAuth.js';
 
 // ── Argument parsing ──────────────────────────────────────────
@@ -73,6 +77,12 @@ export interface CliArgs {
   ptyHost: boolean;
   /** --pty-host-socket: where that process listens (default under ~/.pixel-agents). */
   ptyHostSocket?: string;
+  /** --no-codex: disable read-only Codex session log watching. */
+  codex: boolean;
+  /** --no-antigravity: disable read-only Antigravity log watching. */
+  antigravity: boolean;
+  /** --recent-mins <N>: discover Codex/Antigravity logs modified within N minutes (default 60). */
+  recentMins: number;
 }
 
 /** Thrown by parseArgs on an invalid --port. Kept separate from process.exit so
@@ -87,6 +97,9 @@ export function parseArgs(argv: string[]): CliArgs {
     allowedHosts: [],
     rotateToken: false,
     ptyHost: false,
+    codex: true,
+    antigravity: true,
+    recentMins: DEFAULT_RECENT_WINDOW_MS / 60_000,
   };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--port' || argv[i] === '-p') {
@@ -131,6 +144,21 @@ export function parseArgs(argv: string[]): CliArgs {
       args.ptyHost = true;
       args.ptyHostSocket = path.resolve(raw);
       i++;
+    } else if (argv[i] === '--no-codex') {
+      args.codex = false;
+    } else if (argv[i] === '--no-antigravity') {
+      args.antigravity = false;
+    } else if (argv[i] === '--recent-mins') {
+      const raw = argv[i + 1];
+      if (raw === undefined) {
+        throw new CliArgsError('Missing value for --recent-mins: expected a positive integer.');
+      }
+      const parsed = Number(raw);
+      if (!Number.isInteger(parsed) || parsed <= 0) {
+        throw new CliArgsError(`Invalid --recent-mins "${raw}": must be a positive integer.`);
+      }
+      args.recentMins = parsed;
+      i++;
     } else if (argv[i] === '--help') {
       console.log(`Usage: pixel-agents [options]
 
@@ -144,6 +172,9 @@ Options:
                         old one (bookmarks, other devices) stops working
   --no-terminal         Disable the embedded terminal (watch agents only; no
                         launching or attaching from the browser)
+  --no-codex            Disable read-only Codex session log watching
+  --no-antigravity      Disable read-only Antigravity session log watching
+  --recent-mins <N>     Discover Codex/Antigravity logs active within N minutes (default: 60)
   --pty-host            Development only: run agents' terminals in a separate
                         process that outlives the server, so restarting it
                         (e.g. to update it) leaves agents running
@@ -414,6 +445,33 @@ async function main(): Promise<void> {
       console.log('[Pixel Agents] Assets reloaded (external directory change)');
     };
 
+    // Construct read-only external log watcher before server.start so archive routes bind to it
+    const externalWatcher =
+      args.codex || args.antigravity
+        ? new ExternalLogWatcher({
+            store,
+            enableCodex: args.codex,
+            enableAntigravity: args.antigravity,
+            recentWindowMs: args.recentMins * 60_000,
+            onVendorUsage: (providerId, update, observedAtMs) => {
+              if (recordProviderUsageLimits(providerId, update, observedAtMs)) {
+                store.broadcast({ ...usageLimitsMessage(providerId) });
+              }
+            },
+          })
+        : null;
+
+    const chatBridge = new AgentChatBridge({
+      store,
+      ptyManager,
+      isSessionLocked: (p, id) => externalWatcher?.isSessionOpenLocked(p, id) ?? false,
+    });
+
+    const reviewService = new CrossVendorReviewService({
+      store,
+      chatBridge,
+    });
+
     const config = await server.start({
       store,
       runtime,
@@ -428,6 +486,11 @@ async function main(): Promise<void> {
       packageRoot,
       allowedHosts: args.allowedHosts,
       rotateToken: args.rotateToken,
+      getArchive: () => externalWatcher?.getArchiveEntries() ?? [],
+      onPinArchiveSession: (providerId, id) =>
+        externalWatcher?.pinSession(providerId, id) ?? { ok: false },
+      chatBridge,
+      reviewService,
     });
     currentConfig = { port: config.port, token: config.token };
     if (args.rotateToken) {
@@ -495,6 +558,17 @@ async function main(): Promise<void> {
       runtime.startStaleCheck();
     }
 
+    // Start read-only external log watcher for Codex and Antigravity sessions
+    if (externalWatcher) {
+      externalWatcher.start();
+      const sources = [args.codex ? 'codex' : null, args.antigravity ? 'antigravity' : null]
+        .filter(Boolean)
+        .join(', ');
+      console.log(
+        `[Pixel Agents] External log watcher active: ${sources} (recent=${args.recentMins}m, adopted=${externalWatcher.trackedCount()}, openLocks=${externalWatcher.openLockCount()})`,
+      );
+    }
+
     // The URL the operator opens has to be REACHABLE (a wildcard bind address
     // is a bind target, not an address you can browse to — `--host 0.0.0.0`
     // used to print a dead `http://0.0.0.0:PORT`) and has to carry the token,
@@ -514,6 +588,8 @@ async function main(): Promise<void> {
       if (shuttingDown) return;
       shuttingDown = true;
       console.log('\nShutting down...');
+      reviewService.dispose();
+      externalWatcher?.dispose();
       // In process: kill child terminals and wait for them (each exit closes
       // its agent): exiting now would cancel the SIGKILL escalation and leave
       // a child that ignores SIGHUP orphaned on a dead server. With the PTY

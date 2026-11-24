@@ -4,6 +4,7 @@ import * as path from 'path';
 
 import { LAYOUT_FILE_NAME, LAYOUT_REVISION_KEY, PIXEL_AGENTS_DIR } from './constants.js';
 import { type JsonFileWatcher, watchJsonFile, writeJsonAtomic } from './jsonFileWatcher.js';
+import { upgradeDefaultLayoutWithMeetingRooms } from './meetingRoomLayout.js';
 
 function getLayoutFilePath(): string {
   return path.join(os.homedir(), PIXEL_AGENTS_DIR, LAYOUT_FILE_NAME);
@@ -67,6 +68,14 @@ export function loadLayout(
       return { layout: defaultLayout!, wasReset: true };
     }
     console.log('[Pixel Agents] Layout loaded from file');
+    const { layout: upgradedLayout, upgraded } = upgradeDefaultLayoutWithMeetingRooms(fromFile);
+    if (upgraded) {
+      console.log(
+        '[Pixel Agents] Upgraded office layout with Conference Wing (Meeting Rooms A & B)',
+      );
+      writeLayoutToFile(upgradedLayout);
+      return { layout: upgradedLayout, wasReset: false };
+    }
     return { layout: fromFile, wasReset: false };
   }
 
