@@ -1,16 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { createPortal } from 'react-dom';
 
 import { toMajorMinor } from './changelogData.js';
+import { useCast } from './characters/castStore.js';
 import { CharactersView } from './characters/ui/CharactersView.js';
 import { AgentCardBar } from './components/AgentCardBar.js';
+import { AgentChatDialog } from './components/AgentChatDialog.js';
+import { AgentStatusHud } from './components/AgentStatusHud.js';
+import { BookshelfDialog } from './components/BookshelfDialog.js';
 import { BottomToolbar } from './components/BottomToolbar.js';
 import { ChangelogModal } from './components/ChangelogModal.js';
 import { ConnectionIndicator } from './components/ConnectionIndicator.js';
 import { DebugView } from './components/DebugView.js';
 import { DirectoryModal } from './components/DirectoryModal.js';
 import { EditActionBar } from './components/EditActionBar.js';
+import { FloatingMiniBoard } from './components/FloatingMiniBoard.js';
 import { IntroBubble } from './components/IntroBubble.js';
 import { LoadingScene } from './components/LoadingScene.js';
+import { MeetingRoomDialog } from './components/MeetingRoomDialog.js';
 import { MigrationNotice } from './components/MigrationNotice.js';
 import { SettingsModal } from './components/SettingsModal.js';
 import { TerminalDrawer } from './components/TerminalDrawer.js';
@@ -24,14 +31,18 @@ import type { ConversationSearchScope } from './conversations/ConversationList.j
 import { ConversationSearch } from './conversations/ConversationSearch.js';
 import { ConversationSidebar } from './conversations/ConversationSidebar.js';
 import { useConversationSidebar } from './conversations/useConversationSidebar.js';
+import { useChatTargets } from './hooks/useChatTargets.js';
+import { useCrossVendorReviews } from './hooks/useCrossVendorReviews.js';
 import { useDirectoryEditor } from './hooks/useDirectoryEditor.js';
 import { useEditorActions } from './hooks/useEditorActions.js';
 import { useEditorKeyboard } from './hooks/useEditorKeyboard.js';
 import { useExtensionMessages } from './hooks/useExtensionMessages.js';
+import { useFloatingWindow } from './hooks/useFloatingWindow.js';
 import { useIntroTour } from './hooks/useIntroTour.js';
 import { useIsMobile } from './hooks/useIsMobile.js';
 import { useKeyboardViewport } from './hooks/useKeyboardViewport.js';
 import { useLaunchActions } from './hooks/useLaunchActions.js';
+import { useMeetingRooms } from './hooks/useMeetingRooms.js';
 import { popClass, usePresence } from './hooks/usePresence.js';
 import { useTerminalDrawer } from './hooks/useTerminalDrawer.js';
 import { MobileMenu, MobileMenuButton } from './mobile/MobileMenu.js';
@@ -39,6 +50,7 @@ import { MobileShell } from './mobile/MobileShell.js';
 import { useMobileMenu } from './mobile/useMobileMenu.js';
 import { useMobileShell } from './mobile/useMobileShell.js';
 import { MusicPlayer } from './music/MusicPlayer.js';
+import { MeetingRoomOverlay } from './office/components/MeetingRoomOverlay.js';
 import { OfficeCanvas } from './office/components/OfficeCanvas.js';
 import { ToolOverlay } from './office/components/ToolOverlay.js';
 import { EditorState } from './office/editor/editorState.js';
@@ -53,8 +65,8 @@ import { EditTool, type OfficeLayout, TILE_SIZE } from './office/types.js';
 import { isBrowserRuntime, isE2E } from './runtime.js';
 import { installTestHooks } from './testHooks.js';
 import { transport } from './transport/index.js';
-import { UsageBars } from './usage/UsageBars.js';
-import { useUsageBridge } from './usage/useUsageBridge.js';
+import { VendorUsageStack } from './usage/UsageBars.js';
+import { useAllUsageEntries } from './usage/useUsageBridge.js';
 
 // Game state lives outside React — updated imperatively by message handlers
 const officeStateRef = { current: null as OfficeState | null };
@@ -97,6 +109,9 @@ function App() {
     agentTools,
     agentStatuses,
     agentSeenActivity,
+    agentProviders,
+    agentDirectoryMap,
+    agentTeams,
     subagentTools,
     subagentCharacters,
     layoutReady,
@@ -136,7 +151,8 @@ function App() {
     cardAgents,
     saveCardOrder,
   } = useExtensionMessages(getOfficeState, editor.setLastSavedLayout, isEditDirty);
-  const usage = useUsageBridge();
+  const cast = useCast();
+  const allUsageEntries = useAllUsageEntries();
 
   // Show migration notice once layout reset is detected
   const [migrationNoticeDismissed, setMigrationNoticeDismissed] = useState(false);
@@ -160,6 +176,13 @@ function App() {
   const [hooksTooltipDismissed, setHooksTooltipDismissed] = useState(false);
   const [isDebugMode, setIsDebugMode] = useState(false);
   const [alwaysShowOverlay, setAlwaysShowOverlay] = useState(false);
+  const [isBookshelfOpen, setIsBookshelfOpen] = useState(false);
+  const [isMeetingRoomsOpen, setIsMeetingRoomsOpen] = useState(false);
+  const [chatAgentId, setChatAgentId] = useState<number | null>(null);
+  const floating = useFloatingWindow();
+  const isCompactMode =
+    typeof window !== 'undefined' &&
+    new URLSearchParams(window.location.search).get('compact') === '1';
 
   // Mobile shell (phones, touch tablets): office and terminal as sliding
   // full-screen pages with the cards in a bottom bar. Desktop keeps the
@@ -509,6 +532,90 @@ function App() {
   // Force dependency on editorTickForKeyboard to propagate keyboard-triggered re-renders
   void editorTickForKeyboard;
 
+  const castNames = useMemo(() => cast.profiles.map((p) => p.name ?? ''), [cast.profiles]);
+  const {
+    slots: meetingRoomSlots,
+    rooms: meetingRooms,
+    membersById: meetingRoomMembers,
+    focusRoom: handleFocusMeetingRoom,
+  } = useMeetingRooms({
+    getOfficeState,
+    agents,
+    agentDirectoryMap,
+    agentProviders,
+    agentTeams,
+    agentStatuses,
+    agentTools,
+    subagentCharacters,
+    castNames,
+    layoutReady,
+    editorTick: editor.editorTick,
+    isCompactMode,
+  });
+
+  const { canChatAgent } = useChatTargets({
+    agents,
+    agentTeams,
+    officeReadOnly,
+  });
+
+  const {
+    reviews: crossVendorReviews,
+    busyHostIds: reviewBusyHostIds,
+    busyReviewIds: reviewBusyIds,
+    reviewError,
+    inviteReview,
+    forwardReview,
+    dismissReview,
+  } = useCrossVendorReviews({
+    agents,
+    agentStatuses,
+    officeReadOnly,
+  });
+
+  const communicableAgentIds = useMemo(
+    () => agents.filter((id) => canChatAgent(id)),
+    [agents, canChatAgent],
+  );
+
+  const activeChatReview = useMemo(
+    () =>
+      chatAgentId !== null
+        ? (crossVendorReviews.find((r) => r.hostAgentId === chatAgentId) ?? null)
+        : null,
+    [chatAgentId, crossVendorReviews],
+  );
+  const activeChatReviewBusy =
+    (chatAgentId !== null && reviewBusyHostIds.has(chatAgentId)) ||
+    (activeChatReview !== null && reviewBusyIds.has(activeChatReview.reviewId));
+
+  const handleOpenChat = useCallback(
+    (id: number) => {
+      if (!canChatAgent(id)) return;
+      handleCardSelect(id);
+      setChatAgentId(id);
+    },
+    [canChatAgent, handleCardSelect],
+  );
+
+  const focusedChatTargetId =
+    focusedAgentId !== null && canChatAgent(focusedAgentId)
+      ? focusedAgentId
+      : (communicableAgentIds[0] ?? null);
+
+  const handleFocusMeetingMember = useCallback(
+    (memberId: number) => {
+      if (memberId < 0) {
+        const os = getOfficeState();
+        os.selectAndFollow(memberId);
+        transport.send({ type: 'focusAgent', id: os.terminalOwnerOf(memberId) });
+        return;
+      }
+      handleCardSelect(memberId);
+    },
+    [handleCardSelect],
+  );
+
   // Show "Press R to rotate" hint when a rotatable item is selected or being placed
   const showRotateHint =
     editor.isEditMode &&
@@ -527,6 +634,45 @@ function App() {
       }
       return false;
     })();
+
+  if (isCompactMode) {
+    return (
+      <div className="w-full h-full bg-bg text-text overflow-hidden">
+        <FloatingMiniBoard
+          agentIds={agents}
+          statusFor={terminalDrawer.statusFor}
+          agentProviders={agentProviders}
+          agentDirectoryMap={agentDirectoryMap}
+          agentTools={agentTools}
+          meetingRooms={meetingRooms}
+          meetingRoomMembers={meetingRoomMembers}
+          canChatAgent={canChatAgent}
+          onOpenChat={handleOpenChat}
+          focusedAgentId={focusedAgentId}
+          onFocusAgent={handleFocusMeetingMember}
+        />
+        <AgentChatDialog
+          agentId={chatAgentId}
+          onClose={() => setChatAgentId(null)}
+          onSelectAgent={(id) => setChatAgentId(id)}
+          communicableAgentIds={communicableAgentIds}
+          canChatAgent={canChatAgent}
+          agentProviders={agentProviders}
+          agentDirectoryMap={agentDirectoryMap}
+          meetingRoomMembers={meetingRoomMembers}
+          agentTools={agentTools}
+          agentStatuses={agentStatuses}
+          getAppearance={terminalDrawer.getAppearance}
+          activeReview={activeChatReview}
+          reviewBusy={activeChatReviewBusy}
+          reviewError={reviewError}
+          onInviteReview={inviteReview}
+          onForwardReview={forwardReview}
+          onDismissReview={dismissReview}
+        />
+      </div>
+    );
+  }
 
   if (!layoutReady) {
     return <LoadingScene />;
@@ -559,6 +705,7 @@ function App() {
         showAreas={effectiveShowAreas}
         activeAreaLabel={activeAreaLabel}
         tapSelectsFirst={isMobile}
+        onBookshelfClick={() => setIsBookshelfOpen(true)}
       />
 
       {!isDebugMode ? (
@@ -575,12 +722,43 @@ function App() {
             />
           )}
 
-          {/* The provider's plan usage, top-left (Settings → Usage Bars). */}
-          {usage.status?.installed && (
-            <UsageBars
-              limits={usage.limits}
-              providerName={usage.status.providerName}
+          {/* Per-vendor Weekly & 5-hour usage bars, top-left (strictly isolated per vendor). */}
+          {!officeReadOnly && (
+            <VendorUsageStack
+              entries={allUsageEntries}
+              agentProviders={agentProviders}
               mobile={isMobile}
+            />
+          )}
+
+          {!editor.isEditMode && (
+            <AgentStatusHud
+              agentIds={agents}
+              statusFor={terminalDrawer.statusFor}
+              agentProviders={agentProviders}
+              focusedAgentId={focusedAgentId}
+              onFocusAgent={handleCardSelect}
+              meetingRoomCount={meetingRooms.length}
+              onOpenMeetingRooms={() => setIsMeetingRoomsOpen(true)}
+              canChatFocused={focusedChatTargetId !== null}
+              onOpenChatFocused={() => {
+                if (focusedChatTargetId !== null) handleOpenChat(focusedChatTargetId);
+              }}
+              onOpenBookshelf={() => setIsBookshelfOpen(true)}
+              onToggleFloating={() => void floating.toggleFloating()}
+              isFloatingOpen={floating.isOpen}
+              hotkeySuppressed={
+                isSettingsOpen ||
+                isCharactersOpen ||
+                isChangelogOpen ||
+                isHooksInfoOpen ||
+                isBookshelfOpen ||
+                isMeetingRoomsOpen ||
+                chatAgentId !== null ||
+                showMigrationNotice ||
+                directoryEditor.modal.open ||
+                conversationSearch !== null
+              }
             />
           )}
 
@@ -660,6 +838,19 @@ function App() {
               at z 0 — so every piece of UI over the office (zoom buttons,
               toolbar, cards, editor panels) always draws above them. */}
           <div className="absolute inset-0 z-0 pointer-events-none">
+            <MeetingRoomOverlay
+              officeState={officeState}
+              slots={meetingRoomSlots}
+              rooms={meetingRooms}
+              agentTools={agentTools}
+              containerRef={containerRef}
+              zoom={editor.zoom}
+              panRef={editor.panRef}
+              onSelectRoom={(roomId) => {
+                handleFocusMeetingRoom(roomId);
+                setIsMeetingRoomsOpen(true);
+              }}
+            />
             <ToolOverlay
               officeState={officeState}
               agents={agents}
@@ -671,6 +862,9 @@ function App() {
               panRef={editor.panRef}
               onCloseAgent={handleCloseAgent}
               alwaysShowOverlay={alwaysShowOverlay}
+              meetingRoomMembers={meetingRoomMembers}
+              canChatAgent={canChatAgent}
+              onOpenChat={handleOpenChat}
             />
           </div>
         </>
@@ -846,6 +1040,8 @@ function App() {
               focusedAgentId={focusedAgentId}
               getAppearance={terminalDrawer.getAppearance}
               statusFor={terminalDrawer.statusFor}
+              getProvider={(id) => agentProviders[id]}
+              getLabel={(id) => agentDirectoryMap[id]}
               onSelect={handleCardSelect}
               onClose={handleCloseAgent}
               onReorder={officeReadOnly ? undefined : saveCardOrder}
@@ -1023,6 +1219,75 @@ function App() {
       {showMigrationNotice && (
         <MigrationNotice onDismiss={() => setMigrationNoticeDismissed(true)} />
       )}
+
+      <BookshelfDialog
+        isOpen={isBookshelfOpen}
+        onClose={() => setIsBookshelfOpen(false)}
+        onFocusAgent={handleCardSelect}
+      />
+
+      <MeetingRoomDialog
+        isOpen={isMeetingRoomsOpen}
+        onClose={() => setIsMeetingRoomsOpen(false)}
+        rooms={meetingRooms}
+        agentStatuses={agentStatuses}
+        agentTools={agentTools}
+        getAppearance={terminalDrawer.getAppearance}
+        onFocusAgent={handleFocusMeetingMember}
+        onFocusRoom={handleFocusMeetingRoom}
+        canChatAgent={canChatAgent}
+        onOpenChat={handleOpenChat}
+        reviews={crossVendorReviews}
+        communicableAgentIds={communicableAgentIds}
+        agentProviders={agentProviders}
+        agentDirectoryMap={agentDirectoryMap}
+        reviewBusyHostIds={reviewBusyHostIds}
+        reviewBusyIds={reviewBusyIds}
+        reviewError={reviewError}
+        onInviteReview={inviteReview}
+        onForwardReview={forwardReview}
+        onDismissReview={dismissReview}
+      />
+
+      <AgentChatDialog
+        agentId={chatAgentId}
+        onClose={() => setChatAgentId(null)}
+        onSelectAgent={(id) => setChatAgentId(id)}
+        communicableAgentIds={communicableAgentIds}
+        canChatAgent={canChatAgent}
+        agentProviders={agentProviders}
+        agentDirectoryMap={agentDirectoryMap}
+        meetingRoomMembers={meetingRoomMembers}
+        agentTools={agentTools}
+        agentStatuses={agentStatuses}
+        getAppearance={terminalDrawer.getAppearance}
+        activeReview={activeChatReview}
+        reviewBusy={activeChatReviewBusy}
+        reviewError={reviewError}
+        onInviteReview={inviteReview}
+        onForwardReview={forwardReview}
+        onDismissReview={dismissReview}
+      />
+
+      {floating.portalContainer &&
+        createPortal(
+          <FloatingMiniBoard
+            agentIds={agents}
+            statusFor={terminalDrawer.statusFor}
+            agentProviders={agentProviders}
+            agentDirectoryMap={agentDirectoryMap}
+            agentTools={agentTools}
+            meetingRooms={meetingRooms}
+            meetingRoomMembers={meetingRoomMembers}
+            canChatAgent={canChatAgent}
+            onOpenChat={handleOpenChat}
+            focusedAgentId={focusedAgentId}
+            onFocusAgent={handleFocusMeetingMember}
+            onFocusMainWindow={() => window.focus()}
+            onClose={() => void floating.toggleFloating()}
+          />,
+          floating.portalContainer,
+        )}
     </div>
   );
 }

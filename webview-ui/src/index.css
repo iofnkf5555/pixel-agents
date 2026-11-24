@@ -67,6 +67,13 @@
   /* Non-utility values */
   --vignette: radial-gradient(ellipse at center, transparent 50%, rgba(0, 0, 0, 0.6) 100%);
   --btn-disabled-opacity: 0.35;
+
+  /* Bookshelf Archive & Native Dialog */
+  --color-shelf-bg: #241b16;
+  --color-shelf-wood: #6b4423;
+  --color-shelf-wood-highlight: #8a5a32;
+  --color-shelf-shadow: #3d2412;
+  --color-dialog-backdrop: rgba(0, 0, 0, 0.6);
 }
 
 @theme inline {
@@ -96,6 +103,7 @@
   --color-accent: var(--color-accent);
   --color-text: var(--color-text);
   --color-text-muted: var(--color-text-muted);
+  --color-text-on-accent: var(--color-text-on-accent);
   --color-btn-bg: var(--color-btn-bg);
   --color-btn-hover: var(--color-btn-hover);
   --color-active-bg: var(--color-active-bg);
@@ -107,6 +115,10 @@
   --color-status-active: var(--color-status-active);
   --color-status-success: var(--color-status-success);
   --color-status-error: var(--color-status-error);
+  --color-shelf-bg: var(--color-shelf-bg);
+  --color-shelf-wood: var(--color-shelf-wood);
+  --color-shelf-wood-highlight: var(--color-shelf-wood-highlight);
+  --color-shelf-shadow: var(--color-shelf-shadow);
 
   /* Shadow */
   --shadow-pixel: var(--shadow-pixel);
@@ -693,4 +705,17 @@
   animation-name: usage-heart-beat;
   animation-timing-function: step-end;
   animation-iteration-count: infinite;
+}
+
+dialog.pixel-native-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+dialog.pixel-native-dialog:modal {
+  overscroll-behavior: contain;
+}
+dialog.pixel-native-dialog::backdrop {
+  background: var(--color-dialog-backdrop);
+  overflow: hidden;
+  overscroll-behavior: contain;
 }

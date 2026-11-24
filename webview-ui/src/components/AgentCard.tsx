@@ -3,6 +3,7 @@ import { ContextBar } from '../office/ContextBar.js';
 import { contextLeft, useAgentContextUsed } from '../office/contextGauge.js';
 import type { CardVariant, CloseMode } from './cardBar.js';
 import { CharacterMugShot } from './CharacterMugShot.js';
+import { getProviderBadge } from './providerBadge.js';
 import { STATUS_DOT } from './statusDot.js';
 import { Button } from './ui/Button.js';
 import { PixelIcon } from './ui/PixelIcon.js';
@@ -38,6 +39,10 @@ interface AgentCardProps {
   variant: CardVariant;
   appearance: AgentAppearance;
   status: TabStatus | null;
+  /** Provider that runs this agent ('claude' | 'codex' | 'antigravity'); badge shown when set. */
+  providerId?: string;
+  /** Origin label (workspace / chat), shown in the tooltip. */
+  label?: string;
   /** How the × shows. It is never removed (the card keeps its width so the
    *  bar doesn't reflow): `hover` (desktop) shows it while the card is
    *  hovered or the × has keyboard focus; `hidden` keeps it invisible — the
@@ -56,17 +61,26 @@ export function AgentCard({
   variant,
   appearance,
   status,
+  providerId,
+  label,
   close = 'shown',
   onSelect,
   onClose,
 }: AgentCardProps) {
   const contextUsed = useAgentContextUsed(agentId);
+  const badge = getProviderBadge(providerId);
   return (
     <div
       className={`group relative pointer-events-auto flex items-stretch gap-1 p-1 cursor-pointer border-2 shrink-0 ${CARD_VARIANT[variant]}`}
       onClick={() => onSelect(agentId)}
-      title={`Agent ${agentId}`}
+      title={`${badge.label}${label ? ` · ${label}` : ''} (Agent ${agentId})`}
     >
+      <span
+        className="absolute top-1 left-1 z-10 px-2 leading-none text-2xs pointer-events-none select-none"
+        style={{ background: badge.bg, color: badge.text }}
+      >
+        {badge.short}
+      </span>
       <CharacterMugShot
         palette={appearance.palette}
         repeat={appearance.repeat}

@@ -15,6 +15,8 @@ interface AgentCardBarProps {
   focusedAgentId?: number | null;
   getAppearance: (agentId: number) => AgentAppearance;
   statusFor: (agentId: number) => TabStatus | null;
+  getProvider?: (agentId: number) => string | undefined;
+  getLabel?: (agentId: number) => string | undefined;
   onSelect: (agentId: number) => void;
   onClose: (agentId: number) => void;
   /** Persist a dragged order; absent in a read-only office. */
@@ -44,6 +46,8 @@ export function AgentCardBar({
   focusedAgentId = null,
   getAppearance,
   statusFor,
+  getProvider,
+  getLabel,
   onSelect,
   onClose,
   onReorder,
@@ -60,6 +64,8 @@ export function AgentCardBar({
       focusedAgentId={focusedAgentId}
       getAppearance={getAppearance}
       statusFor={statusFor}
+      getProvider={getProvider}
+      getLabel={getLabel}
       onSelect={onSelect}
       onClose={onClose}
       trailing={trailing}

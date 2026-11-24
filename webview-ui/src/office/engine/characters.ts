@@ -82,6 +82,7 @@ export function createCharacter(
     bubbleType: null,
     bubbleTimer: 0,
     seatTimer: 0,
+    inMeetingRoom: false,
     isSubagent: false,
     helperIdleSec: 0,
     parentAgentId: null,
@@ -110,8 +111,14 @@ export function updateCharacter(
         ch.frameTimer -= TYPE_FRAME_DURATION_SEC;
         ch.frame = (ch.frame + 1) % 2;
       }
-      // If no longer active, stand up and start wandering (after seatTimer expires)
+      // If no longer active, stand up and start wandering (after seatTimer expires).
+      // Characters assigned to a Meeting Room remain seated calmly and never wander off.
       if (!ch.isActive) {
+        if (ch.inMeetingRoom) {
+          ch.seatTimer = 0;
+          ch.frame = 0;
+          break;
+        }
         if (ch.seatTimer > 0) {
           ch.seatTimer -= dt;
           break;
@@ -131,6 +138,38 @@ export function updateCharacter(
       // No idle animation — static pose
       ch.frame = 0;
       if (ch.seatTimer < 0) ch.seatTimer = 0; // clear turn-end sentinel
+      // Meeting Room members return to or remain seated calmly instead of wandering
+      if (ch.inMeetingRoom) {
+        if (ch.seatId) {
+          const seat = seats.get(ch.seatId);
+          if (seat) {
+            if (ch.tileCol === seat.seatCol && ch.tileRow === seat.seatRow) {
+              ch.state = CharacterState.TYPE;
+              ch.dir = seat.facingDir;
+              ch.frame = 0;
+              ch.frameTimer = 0;
+              ch.seatTimer = 0;
+            } else {
+              const path = findPath(
+                ch.tileCol,
+                ch.tileRow,
+                seat.seatCol,
+                seat.seatRow,
+                tileMap,
+                blockedTiles,
+              );
+              if (path.length > 0) {
+                ch.path = path;
+                ch.moveProgress = 0;
+                ch.state = CharacterState.WALK;
+                ch.frame = 0;
+                ch.frameTimer = 0;
+              }
+            }
+          }
+        }
+        break;
+      }
       // If became active, pathfind to seat
       if (ch.isActive) {
         if (!ch.seatId) {
@@ -249,8 +288,9 @@ export function updateCharacter(
               ch.state = CharacterState.TYPE;
               ch.dir = seat.facingDir;
               // seatTimer < 0 is a sentinel from setAgentActive(false) meaning
-              // "turn just ended" — skip the long rest so idle transition is immediate
-              if (ch.seatTimer < 0) {
+              // "turn just ended" — skip the long rest so idle transition is immediate.
+              // Meeting Room members settle into their chair with seatTimer = 0 and never wander.
+              if (ch.inMeetingRoom || ch.seatTimer < 0) {
                 ch.seatTimer = 0;
               } else {
                 restInChair(ch);
@@ -275,8 +315,8 @@ export function updateCharacter(
 
       stepAlongPath(ch, dt);
 
-      // If became active while wandering, repath to seat
-      if (ch.isActive && ch.seatId) {
+      // If became active (or assigned to a Meeting Room) while wandering, repath to seat
+      if ((ch.isActive || ch.inMeetingRoom) && ch.seatId) {
         const seat = seats.get(ch.seatId);
         if (seat) {
           const lastStep = ch.path[ch.path.length - 1];

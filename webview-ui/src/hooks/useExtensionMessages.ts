@@ -50,6 +50,15 @@ export interface SubagentCharacter {
   label: string;
 }
 
+export interface AgentTeamState {
+  teamName?: string;
+  agentName?: string;
+  isTeamLead?: boolean;
+  leadAgentId?: number;
+  teamUsesTmux?: boolean;
+  isReviewer?: boolean;
+}
+
 interface FurnitureAsset {
   id: string;
   name: string;
@@ -99,6 +108,9 @@ interface ExtensionMessageState {
   agentStatuses: Record<number, string>;
   /** Latch: true once an agent has had any activity (first tool or status). */
   agentSeenActivity: Record<number, boolean>;
+  agentProviders: Record<number, string>;
+  agentDirectoryMap: Record<number, string>;
+  agentTeams: Record<number, AgentTeamState>;
   subagentTools: Record<number, Record<string, ToolActivity[]>>;
   subagentCharacters: SubagentCharacter[];
   layoutReady: boolean;
@@ -191,6 +203,9 @@ export function useExtensionMessages(
   const [agentTools, setAgentTools] = useState<Record<number, ToolActivity[]>>({});
   const [agentStatuses, setAgentStatuses] = useState<Record<number, string>>({});
   const [agentSeenActivity, setAgentSeenActivity] = useState<Record<number, boolean>>({});
+  const [agentProviders, setAgentProviders] = useState<Record<number, string>>({});
+  const [agentDirectoryMap, setAgentDirectoryMap] = useState<Record<number, string>>({});
+  const [agentTeams, setAgentTeams] = useState<Record<number, AgentTeamState>>({});
   const markSeenActivity = (id: number) =>
     setAgentSeenActivity((prev) => (prev[id] ? prev : { ...prev, [id]: true }));
   const [subagentTools, setSubagentTools] = useState<
@@ -293,6 +308,9 @@ export function useExtensionMessages(
       setAgentTools((prev) => omitKey(prev, id));
       setAgentStatuses((prev) => omitKey(prev, id));
       setAgentSeenActivity((prev) => omitKey(prev, id));
+      setAgentProviders((prev) => omitKey(prev, id));
+      setAgentDirectoryMap((prev) => omitKey(prev, id));
+      setAgentTeams((prev) => omitKey(prev, id));
       setSubagentTools((prev) => omitKey(prev, id));
       // Remove all sub-agent characters belonging to this agent
       delete backgroundParentToolIdsRef.current[id];
@@ -317,6 +335,7 @@ export function useExtensionMessages(
       setSubagentTools({});
       setAgentTools({});
       setAgentStatuses({});
+      setAgentTeams({});
       backgroundParentToolIdsRef.current = {};
       for (const id of incoming) {
         os.setAgentTool(id, null);
@@ -415,11 +434,18 @@ export function useExtensionMessages(
       } else if (msg.type === 'agentCreated') {
         const id = msg.id as number;
         const directoryName = msg.directoryName as string | undefined;
+        const providerId = msg.providerId as string | undefined;
         const isTeammate = msg.isTeammate as boolean | undefined;
         const teammateName = msg.teammateName as string | undefined;
         const teammateParentId = msg.parentAgentId as number | undefined;
         const teamName = msg.teamName as string | undefined;
         setAgents((prev) => (prev.includes(id) ? prev : [...prev, id]));
+        if (providerId) {
+          setAgentProviders((prev) => ({ ...prev, [id]: providerId }));
+        }
+        if (directoryName) {
+          setAgentDirectoryMap((prev) => ({ ...prev, [id]: directoryName }));
+        }
         // Don't auto-select teammates (keep focus on lead)
         if (!isTeammate) {
           setSelectedAgent(id);
@@ -444,6 +470,7 @@ export function useExtensionMessages(
             parentCh?.directoryName,
             teammateParentId,
           );
+          if (providerId) os.setAgentProvider(id, providerId);
           noteDirectoryName(parentCh?.directoryName);
           // Set team metadata on the character
           const ch = os.characters.get(id);
@@ -452,12 +479,21 @@ export function useExtensionMessages(
             ch.teamName = teamName ?? parentCh?.teamName;
             ch.agentName = teammateName;
           }
+          setAgentTeams((prev) => ({
+            ...prev,
+            [id]: {
+              leadAgentId: teammateParentId,
+              teamName: teamName ?? parentCh?.teamName,
+              agentName: teammateName,
+            },
+          }));
         } else {
           const palette = msg.palette as number | undefined;
           const repeat = msg.repeat as number | undefined;
           // A resumed conversation asks for the seat its agent sat in.
           const seatId = msg.seatId as string | undefined;
           os.addAgent(id, palette, repeat, seatId, undefined, directoryName);
+          if (providerId) os.setAgentProvider(id, providerId);
           noteDirectoryName(directoryName);
           if (isHeadlessAgent(msg.isExternal as boolean | undefined)) {
             os.setHeadless(id, true);
@@ -475,11 +511,14 @@ export function useExtensionMessages(
         const meta = (msg.agentMeta || {}) as Record<number, ExistingAgentMeta>;
         const directoryNames = (msg.directoryNames || {}) as Record<number, string>;
         const externalAgents = (msg.externalAgents || {}) as Record<number, boolean>;
+        const providerIds = (msg.providerIds || {}) as Record<number, string>;
         const headlessAgents: Record<number, boolean> = {};
         for (const id of incoming) {
           noteDirectoryName(directoryNames[id]);
           if (isHeadlessAgent(externalAgents[id])) headlessAgents[id] = true;
         }
+        setAgentProviders((prev) => ({ ...prev, ...providerIds }));
+        setAgentDirectoryMap((prev) => ({ ...prev, ...directoryNames }));
         // Order-independent restore: add agents now if the layout (and its seats)
         // is already built, otherwise buffer them for the next layoutLoaded.
         // Depending on layoutLoaded always arriving last stranded restored agents
@@ -493,6 +532,7 @@ export function useExtensionMessages(
             layoutReadyRef.current,
             pendingAgents,
             headlessAgents,
+            providerIds,
           )
         ) {
           saveAgentSeats(os);
@@ -893,6 +933,10 @@ export function useExtensionMessages(
         } else {
           unmarkTeammate(id);
         }
+        const nextDirectoryName =
+          typeof msg.directoryName === 'string' && msg.directoryName.trim()
+            ? msg.directoryName.trim()
+            : undefined;
         os.setTeamInfo(
           id,
           msg.teamName as string | undefined,
@@ -900,7 +944,33 @@ export function useExtensionMessages(
           msg.isTeamLead as boolean | undefined,
           msg.leadAgentId as number | undefined,
           msg.teamUsesTmux as boolean | undefined,
+          msg.isReviewer as boolean | undefined,
+          nextDirectoryName,
         );
+        if (nextDirectoryName) {
+          setAgentDirectoryMap((prev) => ({ ...prev, [id]: nextDirectoryName }));
+          noteDirectoryName(nextDirectoryName);
+        }
+        setAgentTeams((prev) => {
+          const nextEntry: AgentTeamState = {
+            teamName: msg.teamName as string | undefined,
+            agentName: msg.agentName as string | undefined,
+            isTeamLead: msg.isTeamLead as boolean | undefined,
+            leadAgentId: msg.leadAgentId as number | undefined,
+            teamUsesTmux: msg.teamUsesTmux as boolean | undefined,
+            isReviewer: msg.isReviewer as boolean | undefined,
+          };
+          if (
+            !nextEntry.teamName &&
+            !nextEntry.agentName &&
+            !nextEntry.isTeamLead &&
+            nextEntry.leadAgentId === undefined &&
+            !nextEntry.isReviewer
+          ) {
+            return omitKey(prev, id);
+          }
+          return { ...prev, [id]: nextEntry };
+        });
       } else if (msg.type === 'agentContextUsage') {
         const id = msg.id as number;
         os.setAgentContext(id, msg.contextTokens as number, msg.maxContextTokens as number);
@@ -945,6 +1015,9 @@ export function useExtensionMessages(
     agentTools,
     agentStatuses,
     agentSeenActivity,
+    agentProviders,
+    agentDirectoryMap,
+    agentTeams,
     subagentTools,
     subagentCharacters,
     layoutReady,

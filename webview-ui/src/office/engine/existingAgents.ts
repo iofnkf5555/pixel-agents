@@ -26,6 +26,7 @@ export interface PendingAgent {
   seatId?: string;
   directoryName?: string;
   isHeadless?: boolean;
+  providerId?: string;
 }
 
 /** Minimal structural view of OfficeState this reconciler needs. */
@@ -40,6 +41,7 @@ export interface ExistingAgentsOffice {
     directoryName?: string,
   ) => void;
   setHeadless: (id: number, headless: boolean) => void;
+  setAgentProvider?: (id: number, providerId: string | undefined) => void;
   /** Start an agent at rest: not working, resting in its chair if it has one. */
   restAgent: (id: number) => void;
   /** Give an agent the office already shows the server's look and seat. */
@@ -54,6 +56,7 @@ export interface ExistingAgentsOffice {
 export function restoreAgent(os: ExistingAgentsOffice, p: PendingAgent): void {
   os.addAgent(p.id, p.palette, p.repeat, p.seatId, true, p.directoryName);
   if (p.isHeadless) os.setHeadless(p.id, true);
+  if (p.providerId) os.setAgentProvider?.(p.id, p.providerId);
   os.restAgent(p.id);
 }
 
@@ -73,6 +76,7 @@ export function reconcileExistingAgents(
   layoutReady: boolean,
   pending: PendingAgent[],
   headlessAgents: Record<number, boolean> = {},
+  providerIds: Record<number, string> = {},
 ): boolean {
   let addedDirectly = false;
   for (const id of incoming) {
@@ -84,6 +88,7 @@ export function reconcileExistingAgents(
       seatId: m?.seatId,
       directoryName: directoryNames[id],
       isHeadless: headlessAgents[id] === true,
+      ...(providerIds[id] ? { providerId: providerIds[id] } : {}),
     };
     if (layoutReady) {
       if (!os.characters.has(p.id)) {
@@ -94,6 +99,7 @@ export function reconcileExistingAgents(
         // office's own look and seat and saving them back reshuffled the
         // office for every other viewer.
         os.syncAgent(p.id, p.palette, p.repeat, p.seatId);
+        if (providerIds[id]) os.setAgentProvider?.(id, providerIds[id]);
       }
     } else {
       pending.push(p);

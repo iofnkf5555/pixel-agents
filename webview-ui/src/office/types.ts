@@ -222,6 +222,8 @@ export interface Character extends Blinker {
   bubbleTimer: number;
   /** Timer to stay seated while inactive after seat reassignment (counts down to 0) */
   seatTimer: number;
+  /** True while seated inside a Meeting Room (remains seated calmly, never wanders away). */
+  inMeetingRoom?: boolean;
   /** Whether this character represents a sub-agent (spawned by Task tool) */
   isSubagent: boolean;
   /** A helper's time since its last tool call ended (0 while working). */
@@ -236,6 +238,8 @@ export interface Character extends Blinker {
   matrixEffectSeeds: number[];
   /** Directory name — the agent's origin label (only set for multi-root workspaces) */
   directoryName?: string;
+  /** Provider identifier ('claude' | 'codex' | 'antigravity') */
+  providerId?: string;
   /** Headless agent: adopted from outside the office, so there is no terminal to
    *  focus. Rendered translucent. Teammates and sub-agents are never headless —
    *  clicking them reaches their lead's / parent's terminal. */
@@ -258,6 +262,8 @@ export interface Character extends Blinker {
   leadAgentId?: number;
   /** True when lead spawns teammates via tmux (run_in_background Agent calls) */
   teamUsesTmux?: boolean;
+  /** True when this character is a synthetic cross-vendor reviewer seated in a meeting room */
+  isReviewer?: boolean;
 
   // -- Context gauge --
   /** Tokens in the agent's context as of its newest turn; 0 until reported.

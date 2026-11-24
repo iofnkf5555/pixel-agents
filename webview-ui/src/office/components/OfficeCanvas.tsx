@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react';
 
+import { isBookshelfFurniture } from '../../components/bookshelfUtils.js';
 import {
   CAMERA_FOLLOW_LERP,
   CAMERA_FOLLOW_SNAP_THRESHOLD,
@@ -60,6 +61,8 @@ interface OfficeCanvasProps {
    *  character fires onClick (opens its terminal). Desktop keeps single-click
    *  focus with tap-again-to-deselect. */
   tapSelectsFirst?: boolean;
+  /** Fired when clicking a bookshelf/double bookshelf in normal (non-edit) mode. */
+  onBookshelfClick?: () => void;
 }
 
 export function OfficeCanvas({
@@ -80,6 +83,7 @@ export function OfficeCanvas({
   showAreas,
   activeAreaLabel,
   tapSelectsFirst = false,
+  onBookshelfClick,
 }: OfficeCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -155,7 +159,8 @@ export function OfficeCanvas({
           officeState.cameraFollowId !== null
             ? officeState.characters.get(officeState.cameraFollowId)
             : undefined;
-        const cameraFocus = followCh ?? officeState.greeterCameraTarget;
+        const cameraFocus =
+          followCh ?? officeState.roomCameraTarget ?? officeState.greeterCameraTarget;
         if (cameraFocus) {
           const layout = officeState.getLayout();
           const mapW = layout.cols * TILE_SIZE * zoom;
@@ -418,7 +423,7 @@ export function OfficeCanvas({
       officeState.hoveredTile = tile;
       const canvas = canvasRef.current;
       if (canvas) {
-        canvas.style.cursor = computeNormalModeCursor({
+        const normalCursor = computeNormalModeCursor({
           hitId,
           petId,
           selectedAgentId: officeState.selectedAgentId,
@@ -427,6 +432,13 @@ export function OfficeCanvas({
           getSeat: (seatId) => officeState.seats.get(seatId),
           getCharacter: (id) => officeState.characters.get(id),
         });
+        if (normalCursor === 'default' && onBookshelfClick && tile) {
+          const hitFurniture = furnitureAt(officeState.getLayout(), tile.col, tile.row);
+          canvas.style.cursor =
+            hitFurniture && isBookshelfFurniture(hitFurniture.type) ? 'pointer' : 'default';
+        } else {
+          canvas.style.cursor = normalCursor;
+        }
       }
       officeState.hoveredAgentId = hitId;
     },
@@ -438,6 +450,7 @@ export function OfficeCanvas({
       editorState,
       onEditorTileAction,
       onEditorEraseAction,
+      onBookshelfClick,
       panRef,
       selectionButtonAt,
       clampPan,
@@ -659,6 +672,18 @@ export function OfficeCanvas({
         return;
       }
 
+      // Bookshelf hit (open archive bookshelf dialog)
+      if (onBookshelfClick) {
+        const shelfTile = screenToTile(clientX, clientY);
+        const hitFurniture = shelfTile
+          ? furnitureAt(officeState.getLayout(), shelfTile.col, shelfTile.row)
+          : null;
+        if (hitFurniture && isBookshelfFurniture(hitFurniture.type)) {
+          onBookshelfClick();
+          return;
+        }
+      }
+
       // No agent hit — check seat click while agent is selected
       if (officeState.selectedAgentId !== null) {
         const selectedCh = officeState.characters.get(officeState.selectedAgentId);
@@ -696,7 +721,7 @@ export function OfficeCanvas({
         officeState.cameraFollowId = null;
       }
     },
-    [officeState, onClick, screenToWorld, screenToTile, tapSelectsFirst],
+    [officeState, onClick, screenToWorld, screenToTile, tapSelectsFirst, onBookshelfClick],
   );
 
   const handleClick = useCallback(

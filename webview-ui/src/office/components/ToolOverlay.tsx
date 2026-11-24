@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
 
+import { getProviderBadge } from '../../components/providerBadge.js';
 import { Button } from '../../components/ui/Button.js';
 import { PixelIcon } from '../../components/ui/PixelIcon.js';
 import {
@@ -22,6 +23,7 @@ import type { SubagentCharacter } from '../../hooks/useExtensionMessages.js';
 import { ContextBar } from '../ContextBar.js';
 import { contextLeft } from '../contextGauge.js';
 import type { OfficeState } from '../engine/officeState.js';
+import type { MeetingRoomMemberInfo } from '../meetingRooms.js';
 import { overlayProjection } from '../projection.js';
 import { getCachedSprite } from '../sprites/spriteCache.js';
 import { BUBBLE_PERMISSION_SPRITE, BUBBLE_WAITING_SPRITE } from '../sprites/spriteData.js';
@@ -45,6 +47,9 @@ interface ToolOverlayProps {
   panRef: React.RefObject<{ x: number; y: number }>;
   onCloseAgent: (id: number) => void;
   alwaysShowOverlay: boolean;
+  meetingRoomMembers?: ReadonlyMap<number, MeetingRoomMemberInfo>;
+  canChatAgent?: (id: number) => boolean;
+  onOpenChat?: (id: number) => void;
 }
 
 /** Derive a short human-readable activity string from tools/status */
@@ -111,6 +116,9 @@ export function ToolOverlay({
   panRef,
   onCloseAgent,
   alwaysShowOverlay,
+  meetingRoomMembers,
+  canChatAgent,
+  onOpenChat,
 }: ToolOverlayProps) {
   const [, setTick] = useState(0);
   useEffect(() => {
@@ -279,7 +287,8 @@ export function ToolOverlay({
         }
 
         // Team info
-        const teamRoleLabel = ch.isTeamLead ? 'LEAD' : ch.agentName || null;
+        const roomMember = meetingRoomMembers?.get(id);
+        const teamRoleLabel = roomMember ? null : ch.isTeamLead ? 'LEAD' : ch.agentName || null;
 
         // Context gauge. Every agent gets one — lead, teammate, adopted,
         // headless — as soon as the server reports its context (a cleared
@@ -315,48 +324,117 @@ export function ToolOverlay({
                   />
                 )}
                 <div className="flex flex-col gap-0 overflow-hidden">
-                  {teamRoleLabel && (
-                    <span
-                      className="overflow-hidden text-ellipsis block leading-none"
-                      style={{
-                        fontSize: '18px',
-                        color: ch.isTeamLead ? TEAM_LEAD_COLOR : TEAM_ROLE_COLOR,
-                        fontWeight: ch.isTeamLead ? 'bold' : undefined,
-                      }}
-                    >
-                      {teamRoleLabel}
-                    </span>
-                  )}
-                  <span
-                    className="overflow-hidden text-ellipsis block leading-none"
-                    style={{
-                      fontSize: isSub ? '20px' : '22px',
-                      fontStyle: isSub ? 'italic' : undefined,
-                    }}
-                  >
-                    {activityText}
-                  </span>
-                  {ch.directoryName && (
-                    <span className="text-2xs leading-none overflow-hidden text-ellipsis block">
-                      {ch.directoryName}
-                    </span>
+                  {roomMember ? (
+                    <>
+                      <span className="flex items-center gap-4 overflow-hidden">
+                        {roomMember.isLead && (
+                          <span className="px-3 py-1 bg-accent text-text-on-accent text-2xs leading-none shrink-0">
+                            主導
+                          </span>
+                        )}
+                        {roomMember.isReviewer && (
+                          <span className="px-3 py-1 bg-panel border border-accent-bright text-accent-bright text-2xs leading-none shrink-0">
+                            審查
+                          </span>
+                        )}
+                        <span
+                          className="overflow-hidden text-ellipsis block leading-none text-accent-bright"
+                          style={{ fontSize: isSub ? '20px' : '22px' }}
+                        >
+                          {roomMember.roleName}
+                        </span>
+                      </span>
+                      <span className="flex items-center gap-3 text-2xs leading-none overflow-hidden text-ellipsis mt-1">
+                        {!isSub && (
+                          <span
+                            className="px-2 py-1 leading-none shrink-0"
+                            style={{
+                              background: getProviderBadge(ch.providerId).bg,
+                              color: getProviderBadge(ch.providerId).text,
+                            }}
+                          >
+                            {getProviderBadge(ch.providerId).short}
+                          </span>
+                        )}
+                        <span className="overflow-hidden text-ellipsis text-text-muted">
+                          {activityText}
+                        </span>
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      {teamRoleLabel && (
+                        <span
+                          className="overflow-hidden text-ellipsis block leading-none"
+                          style={{
+                            fontSize: '18px',
+                            color: ch.isTeamLead ? TEAM_LEAD_COLOR : TEAM_ROLE_COLOR,
+                            fontWeight: ch.isTeamLead ? 'bold' : undefined,
+                          }}
+                        >
+                          {teamRoleLabel}
+                        </span>
+                      )}
+                      <span
+                        className="overflow-hidden text-ellipsis block leading-none"
+                        style={{
+                          fontSize: isSub ? '20px' : '22px',
+                          fontStyle: isSub ? 'italic' : undefined,
+                        }}
+                      >
+                        {activityText}
+                      </span>
+                      {!isSub && (
+                        <span className="flex items-center gap-3 text-2xs leading-none overflow-hidden text-ellipsis">
+                          <span
+                            className="px-2 py-1 leading-none shrink-0"
+                            style={{
+                              background: getProviderBadge(ch.providerId).bg,
+                              color: getProviderBadge(ch.providerId).text,
+                            }}
+                          >
+                            {getProviderBadge(ch.providerId).label}
+                          </span>
+                          {ch.directoryName && (
+                            <span className="overflow-hidden text-ellipsis">
+                              {ch.directoryName}
+                            </span>
+                          )}
+                        </span>
+                      )}
+                    </>
                   )}
                 </div>
                 {isSelected && !isSub && (
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onCloseAgent(id);
-                    }}
-                    title="Close agent"
-                    className="ml-2 shrink-0"
-                  >
-                    {/* The panel's padding favours the text (pb > pt) and the × fills
-                        rows 1–5 of its grid: 3px lower centres it on the label line. */}
-                    <PixelIcon name="close" className="translate-y-3" />
-                  </Button>
+                  <div className="ml-2 flex items-center gap-3 shrink-0">
+                    {canChatAgent?.(id) && onOpenChat && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onOpenChat(id);
+                        }}
+                        title="與這位 Agent／主導者對話"
+                        className="px-6 py-2 bg-accent hover:bg-accent-bright text-text-on-accent border border-accent-bright text-2xs leading-none cursor-pointer"
+                      >
+                        對話
+                      </button>
+                    )}
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onCloseAgent(id);
+                      }}
+                      title="Close agent"
+                      className="shrink-0"
+                    >
+                      {/* The panel's padding favours the text (pb > pt) and the × fills
+                          rows 1–5 of its grid: 3px lower centres it on the label line. */}
+                      <PixelIcon name="close" className="translate-y-3" />
+                    </Button>
+                  </div>
                 )}
               </div>
               {showContextGauge && (

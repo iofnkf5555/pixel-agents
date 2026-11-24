@@ -28,6 +28,8 @@ interface AgentCardListProps {
   closeOnlyWhenActive?: boolean;
   getAppearance: (agentId: number) => AgentAppearance;
   statusFor: (agentId: number) => TabStatus | null;
+  getProvider?: (agentId: number) => string | undefined;
+  getLabel?: (agentId: number) => string | undefined;
   onSelect: (agentId: number) => void;
   onClose: (agentId: number) => void;
   /** Drawn after the cards, in the same scroller (the desktop terminal's hide ribbon). */
@@ -52,6 +54,8 @@ export function AgentCardList({
   closeOnlyWhenActive = false,
   getAppearance,
   statusFor,
+  getProvider,
+  getLabel,
   onSelect,
   onClose,
   trailing,
@@ -98,6 +102,8 @@ export function AgentCardList({
               variant={variant}
               appearance={getAppearance(agentId)}
               status={statusFor(agentId)}
+              providerId={getProvider?.(agentId)}
+              label={getLabel?.(agentId)}
               close={closeMode(variant, closeOnlyWhenActive)}
               onSelect={onSelect}
               onClose={onClose}

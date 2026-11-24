@@ -25,6 +25,12 @@ import {
 } from '../layout/layoutSerializer.js';
 import { findPath, getWalkableTiles, isWalkable } from '../layout/tileMap.js';
 import { pairWorkstations } from '../layout/workstations.js';
+import {
+  isMeetingRoomSeatUid,
+  type MeetingRoomModel,
+  type MeetingRoomSlot,
+  type RoomBounds,
+} from '../meetingRooms.js';
 import { getPetCount, getPetName } from '../sprites/petSpriteData.js';
 import { getLoadedCharacterCount } from '../sprites/spriteData.js';
 import type {
@@ -105,7 +111,13 @@ export class OfficeState {
     return () => this.selectionListeners.delete(listener);
   }
   cameraFollowId: number | null = null;
+  roomCameraTarget: { x: number; y: number } | null = null;
   hoveredAgentId: number | null = null;
+  private agentRoomBounds = new Map<number, RoomBounds>();
+  private meetingRoomBoundsList: RoomBounds[] = [];
+  private walkableCacheValid = false;
+  private soloWalkableTiles: Tile[] = [];
+  private roomWalkableTiles = new Map<string, Tile[]>();
   hoveredTile: { col: number; row: number } | null = null;
   /** Maps "parentId:toolId" → sub-agent character ID (negative) */
   subagentIdMap: Map<string, number> = new Map();
@@ -175,6 +187,7 @@ export class OfficeState {
     this.blockedTiles = getBlockedTiles(layout.furniture);
     this.rebuildFurnitureInstances();
     this.walkableTiles = getWalkableTiles(this.tileMap, this.blockedTiles);
+    this.walkableCacheValid = false;
 
     // Shift character positions when grid expands left/up
     if (shift && (shift.col !== 0 || shift.row !== 0)) {
@@ -366,18 +379,22 @@ export class OfficeState {
    * unzoned seats from a layout without `areaTiles`, which is every seat).
    */
   private findFreeSeat(directoryName?: string): string | null {
-    const freeSeats: string[] = [];
+    const allFree: string[] = [];
+    const regularFree: string[] = [];
     for (const [uid, seat] of this.seats) {
-      if (!seat.assigned) freeSeats.push(uid);
+      if (seat.assigned) continue;
+      allFree.push(uid);
+      if (!isMeetingRoomSeatUid(uid)) regularFree.push(uid);
     }
-    if (freeSeats.length === 0) return null;
+    if (allFree.length === 0) return null;
 
     const areaLabels = directoryName ? this.areaMappings[directoryName] : undefined;
+    const pool = regularFree.length > 0 ? regularFree : allFree;
 
     // Stage 1 — in-area seats for the Directory's mapped Area labels.
     if (areaLabels && areaLabels.length > 0) {
       const wanted = new Set(areaLabels);
-      const inArea = freeSeats.filter((uid) => {
+      const inArea = pool.filter((uid) => {
         const label = this.seatZone(uid);
         return label !== null && wanted.has(label);
       });
@@ -386,12 +403,12 @@ export class OfficeState {
     }
 
     // Stage 2 — unzoned seats (no area label, or layout has no areas at all).
-    const unzoned = freeSeats.filter((uid) => this.seatZone(uid) === null);
+    const unzoned = pool.filter((uid) => this.seatZone(uid) === null);
     const pick2 = this.pickFromSeats(unzoned);
     if (pick2) return pick2;
 
-    // Stage 3 — any free seat.
-    return this.pickFromSeats(freeSeats);
+    // Stage 3 — any free seat (preferring regular seats before falling back to meeting rooms).
+    return this.pickFromSeats(pool) ?? this.pickFromSeats(allFree);
   }
 
   /** The way a lead's sub-agents face: its seat's way (how it sits to work),
@@ -585,16 +602,25 @@ export class OfficeState {
   }
 
   /** Every manual pan (mouse, wheel, touch) takes the camera back from both
-   *  automatic drivers: character follow and the greeter's ask. */
+   *  automatic drivers: character follow, room focus, and the greeter's ask. */
   breakCameraFollow(): void {
     this.cameraFollowId = null;
+    this.roomCameraTarget = null;
     this.cancelGreeterCamera();
+  }
+
+  /** Smoothly center the camera on an arbitrary world coordinate (e.g. a Meeting Room). */
+  focusWorldPoint(x: number, y: number): void {
+    this.cameraFollowId = null;
+    this.cancelGreeterCamera();
+    this.roomCameraTarget = { x, y };
   }
 
   /** Select an agent's character and have the camera follow it — what a card
    *  tap does to the office. No-op for an agent with no character. */
   selectAndFollow(id: number): void {
     if (!this.characters.has(id)) return;
+    this.roomCameraTarget = null;
     this.selectedAgentId = id;
     this.cameraFollowId = id;
   }
@@ -913,12 +939,18 @@ export class OfficeState {
       ch.isActive = active;
       // Only a turn that just ended stands the agent up: one already at rest
       // (restored, or told again on a reconnect) keeps resting.
+      // Meeting room members stay seated calmly and keep walking to their seat if still en route.
       if (turnEnded) {
-        // Sentinel -1: signals turn just ended, skip next seat rest timer.
-        // Prevents the WALK handler from setting a 2-4 min rest on arrival.
-        ch.seatTimer = -1;
-        ch.path = [];
-        ch.moveProgress = 0;
+        if (ch.inMeetingRoom) {
+          ch.seatTimer = 0;
+          if (ch.state === CharacterState.TYPE) ch.frame = 0;
+        } else {
+          // Sentinel -1: signals turn just ended, skip next seat rest timer.
+          // Prevents the WALK handler from setting a 2-4 min rest on arrival.
+          ch.seatTimer = -1;
+          ch.path = [];
+          ch.moveProgress = 0;
+        }
       }
       this.rebuildFurnitureInstances();
     }
@@ -1153,6 +1185,8 @@ export class OfficeState {
     isTeamLead?: boolean,
     leadAgentId?: number,
     teamUsesTmux?: boolean,
+    isReviewer?: boolean,
+    directoryName?: string,
   ): void {
     const ch = this.characters.get(id);
     if (!ch) return;
@@ -1163,6 +1197,10 @@ export class OfficeState {
     ch.leadAgentId = leadAgentId;
     if (teamUsesTmux !== undefined) {
       ch.teamUsesTmux = teamUsesTmux;
+    }
+    ch.isReviewer = isReviewer;
+    if (directoryName) {
+      ch.directoryName = directoryName;
     }
     // A teammate is not a headless agent: clicking it focuses its lead's terminal.
     // Adopted sessions are marked headless at creation and only later discovered
@@ -1185,12 +1223,190 @@ export class OfficeState {
     ch.isHeadless = headless;
   }
 
+  setAgentProvider(id: number, providerId: string | undefined): void {
+    const ch = this.characters.get(id);
+    if (!ch) return;
+    ch.providerId = providerId;
+  }
+
   setAgentContext(id: number, contextTokens: number, maxContextTokens: number): void {
     const ch = this.characters.get(id);
     if (!ch || contextUsedShare(contextTokens, maxContextTokens) === null) return;
     ch.contextTokens = contextTokens;
     ch.maxContextTokens = maxContextTokens;
     ch.contextReported = true;
+  }
+
+  private tileInBounds(col: number, row: number, bounds: RoomBounds): boolean {
+    return (
+      col >= bounds.minCol && col <= bounds.maxCol && row >= bounds.minRow && row <= bounds.maxRow
+    );
+  }
+
+  private ensureWalkableCaches(): void {
+    if (this.walkableCacheValid) return;
+    this.walkableCacheValid = true;
+    this.roomWalkableTiles.clear();
+    if (this.meetingRoomBoundsList.length === 0) {
+      this.soloWalkableTiles = this.walkableTiles;
+    } else {
+      const outside = this.walkableTiles.filter(
+        (t) => !this.meetingRoomBoundsList.some((b) => this.tileInBounds(t.col, t.row, b)),
+      );
+      this.soloWalkableTiles = outside.length > 0 ? outside : this.walkableTiles;
+    }
+  }
+
+  private getRoomWalkableTiles(bounds: RoomBounds): Tile[] {
+    this.ensureWalkableCaches();
+    const key = `${bounds.minCol},${bounds.maxCol},${bounds.minRow},${bounds.maxRow}`;
+    let cached = this.roomWalkableTiles.get(key);
+    if (!cached) {
+      const inside = this.walkableTiles.filter((t) => this.tileInBounds(t.col, t.row, bounds));
+      cached = inside.length > 0 ? inside : this.walkableTiles;
+      this.roomWalkableTiles.set(key, cached);
+    }
+    return cached;
+  }
+
+  private walkableTilesFor(ch: Character): Tile[] {
+    this.ensureWalkableCaches();
+    const bounds = this.agentRoomBounds.get(ch.id);
+    if (bounds) return this.getRoomWalkableTiles(bounds);
+    return this.soloWalkableTiles;
+  }
+
+  /**
+   * Synchronize seating and roaming containment for active Meeting Rooms so team/subagent
+   * trees and same-project multi-sessions sit together in dedicated Conference Rooms, while
+   * solo agents stay in the main workspace.
+   */
+  syncMeetingRoomSeating(
+    rooms: readonly MeetingRoomModel[],
+    allSlots: readonly MeetingRoomSlot[],
+  ): void {
+    this.meetingRoomBoundsList = allSlots
+      .filter((s) => s.id === 'mr1' || s.id === 'mr2')
+      .map((s) => s.bounds);
+    this.agentRoomBounds.clear();
+    this.walkableCacheValid = false;
+
+    const slottedRooms = rooms.filter(
+      (r): r is MeetingRoomModel & { slot: MeetingRoomSlot } => r.slot !== null,
+    );
+    const desiredRoomSeatSet = new Set<string>();
+    const assignedAgentIds = new Set<number>();
+
+    for (const room of slottedRooms) {
+      for (const uid of room.slot.seatIds) {
+        desiredRoomSeatSet.add(uid);
+      }
+      for (const member of room.members) {
+        assignedAgentIds.add(member.id);
+        this.agentRoomBounds.set(member.id, room.slot.bounds);
+      }
+    }
+
+    for (const ch of this.characters.values()) {
+      if (ch.isSubagent) continue;
+      const inRoom = assignedAgentIds.has(ch.id);
+      ch.inMeetingRoom = inRoom;
+      if (!inRoom && ch.state === CharacterState.TYPE && !ch.isActive && ch.seatTimer === 0) {
+        restInChair(ch);
+      }
+    }
+
+    // 1. Vacate solo agents sitting in dedicated meeting seats or seats needed by active rooms
+    const displaced: Character[] = [];
+    for (const ch of this.characters.values()) {
+      if (ch.isSubagent || assignedAgentIds.has(ch.id) || !ch.seatId) continue;
+      if (isMeetingRoomSeatUid(ch.seatId) || desiredRoomSeatSet.has(ch.seatId)) {
+        const oldSeat = this.seats.get(ch.seatId);
+        if (oldSeat) oldSeat.assigned = false;
+        ch.seatId = null;
+        displaced.push(ch);
+      }
+    }
+
+    // 2. Seat members of each slotted Meeting Room together (Lead first)
+    for (const room of slottedRooms) {
+      const slot = room.slot;
+      const validSeatIds = slot.seatIds.filter((uid) => this.seats.has(uid));
+      const slotSeatSet = new Set(validSeatIds);
+      const roomSeatedMembers = room.members
+        .map((m) => this.characters.get(m.id))
+        .filter((ch): ch is Character => Boolean(ch && !ch.isSubagent));
+
+      const usedSeats = new Set<string>();
+      const needsSeat: Character[] = [];
+      for (const ch of roomSeatedMembers) {
+        if (ch.seatId && slotSeatSet.has(ch.seatId) && !usedSeats.has(ch.seatId)) {
+          usedSeats.add(ch.seatId);
+          const seat = this.seats.get(ch.seatId);
+          if (
+            seat &&
+            (ch.tileCol !== seat.seatCol || ch.tileRow !== seat.seatRow) &&
+            ch.state === CharacterState.IDLE
+          ) {
+            this.sendToSeat(ch.id);
+          }
+        } else {
+          needsSeat.push(ch);
+        }
+      }
+
+      const availableSeats = validSeatIds.filter((uid) => !usedSeats.has(uid));
+      for (const ch of needsSeat) {
+        const seatUid = availableSeats.shift();
+        if (seatUid) {
+          // Ensure no other character holds this room seat before reassigning
+          for (const other of this.characters.values()) {
+            if (other.id !== ch.id && other.seatId === seatUid) {
+              const s = this.seats.get(seatUid);
+              if (s) s.assigned = false;
+              other.seatId = null;
+              if (!assignedAgentIds.has(other.id)) displaced.push(other);
+            }
+          }
+          this.reassignSeat(ch.id, seatUid);
+        } else {
+          // Overflow beyond chair count: release distant seat and stand inside the meeting room
+          if (ch.seatId) {
+            const old = this.seats.get(ch.seatId);
+            if (old) old.assigned = false;
+            ch.seatId = null;
+          }
+          if (!this.tileInBounds(ch.tileCol, ch.tileRow, slot.bounds)) {
+            const roomTiles = this.getRoomWalkableTiles(slot.bounds);
+            const taken = this.takenTiles({ except: ch.id, destinations: true });
+            const freeTile = roomTiles.find((t) => !taken.has(`${t.col},${t.row}`)) ?? roomTiles[0];
+            if (freeTile) {
+              this.walkToTile(ch.id, freeTile.col, freeTile.row);
+            }
+          }
+        }
+      }
+    }
+
+    // 3. Return displaced solo agents to normal office desks
+    for (const ch of displaced) {
+      if (ch.seatId || assignedAgentIds.has(ch.id)) continue;
+      const nextSeat = this.findFreeSeat(ch.directoryName);
+      if (nextSeat) {
+        this.reassignSeat(ch.id, nextSeat);
+      } else {
+        this.ensureWalkableCaches();
+        const soloTiles = this.soloWalkableTiles;
+        if (
+          soloTiles.length > 0 &&
+          !soloTiles.some((t) => t.col === ch.tileCol && t.row === ch.tileRow)
+        ) {
+          const taken = this.takenTiles({ except: ch.id, destinations: true });
+          const target = soloTiles.find((t) => !taken.has(`${t.col},${t.row}`)) ?? soloTiles[0];
+          this.walkToTile(ch.id, target.col, target.row);
+        }
+      }
+    }
   }
 
   update(dt: number): void {
@@ -1233,9 +1449,10 @@ export class OfficeState {
           this.blockedTiles,
         );
       } else {
+        const walkable = this.walkableTilesFor(ch);
         // Temporarily unblock own seat so character can pathfind to it
         this.withOwnSeatUnblocked(ch, () =>
-          updateCharacter(ch, dt, this.walkableTiles, this.seats, this.tileMap, this.blockedTiles),
+          updateCharacter(ch, dt, walkable, this.seats, this.tileMap, this.blockedTiles),
         );
       }
 
