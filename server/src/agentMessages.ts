@@ -16,6 +16,7 @@ export function agentCreatedMessage(id: number, agent: AgentState): Record<strin
     parentAgentId: agent.leadAgentId,
     teamName: agent.teamName,
     hooksOnly: agent.hooksOnly || undefined,
+    providerId: agent.providerId,
     palette: agent.palette,
     repeat: agent.repeat,
     seatId: agent.seatId,

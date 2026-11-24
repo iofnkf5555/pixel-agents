@@ -213,6 +213,9 @@ components:
           type: string
         isExternal:
           type: boolean
+        providerId:
+          type: string
+          description: Provider identifier (e.g. 'claude', 'codex', 'antigravity').
         palette:
           type: integer
           description: Server-assigned character palette index.
@@ -277,6 +280,11 @@ components:
           description: Map of agent ID (string) to external flag.
           additionalProperties:
             type: boolean
+        providerIds:
+          type: object
+          description: Map of agent ID (string) to provider identifier.
+          additionalProperties:
+            type: string
 
     AgentStatus:
       description: Active vs waiting state for an agent (drives character animation).
@@ -454,6 +462,10 @@ components:
           type: integer
         teamUsesTmux:
           type: boolean
+        isReviewer:
+          type: boolean
+        directoryName:
+          type: string
 
     AgentContextUsage:
       description: |
@@ -856,6 +868,13 @@ components:
           $ref: '#/components/schemas/UsageWindow'
         sevenDay:
           $ref: '#/components/schemas/UsageWindow'
+        planType:
+          type: string
+          description: Vendor plan tier label when reported (e.g. plus, pro).
+        fiveHourActivity:
+          $ref: '#/components/schemas/LocalWindowActivity'
+        sevenDayActivity:
+          $ref: '#/components/schemas/LocalWindowActivity'
         updatedAt:
           type: number
           description: When the last report arrived (epoch milliseconds).
@@ -1738,6 +1757,24 @@ components:
         resetsAt:
           type: number
           description: When the window resets (Unix epoch SECONDS).
+
+    LocalWindowActivity:
+      description: Local rolling token usage aggregated strictly from one vendor's transcripts.
+      type: object
+      additionalProperties: false
+      required: [tokens, inputTokens, outputTokens, turns]
+      properties:
+        tokens:
+          type: number
+          description: Non-cached tokens used in this window (inputTokens + outputTokens).
+        inputTokens:
+          type: number
+        outputTokens:
+          type: number
+        cacheReadTokens:
+          type: number
+        turns:
+          type: number
 
     AgentSeatMeta:
       description: |

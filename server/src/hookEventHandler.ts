@@ -435,6 +435,7 @@ export class HookEventHandler {
     // Cancel waiting, mark active
     cancelWaitingTimer(agentId, this.waitingTimers);
     agent.isWaiting = false;
+    agent.awaitingInput = false;
     agent.turnActive = true;
     agent.permissionSent = false;
     agent.hadToolsInTurn = true;
@@ -778,6 +779,7 @@ export class HookEventHandler {
     }
 
     agent.isWaiting = true;
+    agent.awaitingInput = awaitingInput;
     agent.turnActive = false;
     agent.permissionSent = false;
     agent.hadToolsInTurn = false;

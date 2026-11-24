@@ -102,6 +102,7 @@ export interface AgentCreated {
   id: number;
   directoryName?: string;
   isExternal?: boolean;
+  providerId?: string;
   palette?: number;
   repeat?: number;
   seatId?: string;
@@ -123,6 +124,7 @@ export interface ExistingAgents {
   agentMeta: Record<string, AgentSeatMeta>;
   directoryNames: Record<string, string>;
   externalAgents: Record<string, boolean>;
+  providerIds?: Record<string, string>;
 }
 
 export interface AgentSeatMeta {
@@ -207,6 +209,8 @@ export interface AgentTeamInfo {
   isTeamLead?: boolean;
   leadAgentId?: number;
   teamUsesTmux?: boolean;
+  isReviewer?: boolean;
+  directoryName?: string;
 }
 
 export interface AgentContextUsage {
@@ -411,12 +415,23 @@ export interface UsageLimits {
   providerId: string;
   fiveHour?: UsageWindow;
   sevenDay?: UsageWindow;
+  planType?: string;
+  fiveHourActivity?: LocalWindowActivity;
+  sevenDayActivity?: LocalWindowActivity;
   updatedAt?: number;
 }
 
 export interface UsageWindow {
   usedPercentage: number;
   resetsAt: number;
+}
+
+export interface LocalWindowActivity {
+  tokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens?: number;
+  turns: number;
 }
 
 export interface ExternalAssetDirectoriesUpdated {

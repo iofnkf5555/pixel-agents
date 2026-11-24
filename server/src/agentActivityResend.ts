@@ -18,8 +18,14 @@ export function resendAgentActivity(
   for (const [id, agent] of store) {
     // 1. Team metadata first — webview uses this to route tool messages correctly.
     // Derived teams (named background spawns) have a name and a lead link but NO
-    // teamName, so gate on any team field.
-    if (agent.teamName || agent.agentName || agent.isTeamLead) {
+    // teamName, and linked external subagents may have only leadAgentId.
+    if (
+      agent.teamName ||
+      agent.agentName ||
+      agent.isTeamLead ||
+      agent.leadAgentId !== undefined ||
+      agent.isReviewer
+    ) {
       send({
         type: 'agentTeamInfo',
         id,
@@ -28,6 +34,7 @@ export function resendAgentActivity(
         isTeamLead: agent.isTeamLead,
         leadAgentId: agent.leadAgentId,
         teamUsesTmux: agent.teamUsesTmux,
+        isReviewer: agent.isReviewer,
       });
     }
 
@@ -76,6 +83,7 @@ export function resendAgentActivity(
         type: 'agentStatus',
         id,
         status: 'waiting',
+        awaitingInput: agent.awaitingInput || undefined,
       });
     } else if (agent.turnActive) {
       send({ type: 'agentStatus', id, status: 'active' });

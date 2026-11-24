@@ -22,6 +22,8 @@ export interface AgentState {
    *  the completion queue-operation), see BackgroundSpawns. */
   backgroundSpawns: BackgroundSpawns;
   isWaiting: boolean;
+  /** True when waiting on user input (vs simply finished turn). Preserved across reconnects. */
+  awaitingInput?: boolean;
   /** The office was last told this agent is active (agentStatus 'active', not
    *  yet 'waiting'), so a connecting client is told too: a turn between two
    *  tools has no live tool to say so. Unset for an agent with no turn seen. */
@@ -84,6 +86,10 @@ export interface AgentState {
   leadAgentId?: number;
   /** True when lead spawns teammates via tmux (run_in_background Agent calls) */
   teamUsesTmux?: boolean;
+  /** True when this agent is a synthetic cross-vendor reviewer seated in a meeting room */
+  isReviewer?: boolean;
+  /** Review record id when this synthetic agent represents an active cross-vendor review */
+  reviewId?: string;
   /** For a promoted anonymous background agent (teams OFF): the lead's Agent
    *  tool_use id that spawned it. Links this character to the lead's
    *  backgroundSpawns entry so the queue-operation completion removes it. */
@@ -93,6 +99,12 @@ export interface AgentState {
    *  the webview never creates a Subtask ghost for them. Transient, lazily
    *  created, never persisted. */
   teammateSpawnToolIds?: Set<string>;
+  /** True when the session was spawned by another agent (Codex source.subagent/parent_thread_id
+   *  or Antigravity SYSTEM-initiated subagent), even if its parent closed. */
+  isAgentSpawned?: boolean;
+  /** Path to external JSONL log file (Codex rollout / Antigravity transcript), kept
+   *  distinct from `jsonlFile` so Claude's fileWatcher/dismissalTracker never touch it. */
+  externalLogFile?: string;
 
   // -- Avatar customization --
   /** Preferred character palette (0-5). If undefined, auto-assigned for diversity. */

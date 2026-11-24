@@ -507,15 +507,19 @@ export function sendExistingAgents(
   // Include persisted palette/seatId from separate key
   const agentMeta = adapter.loadSeats();
 
-  // Include directoryName and isExternal per agent
+  // Include directoryName, isExternal, and providerId per agent
   const directoryNames: Record<number, string> = {};
   const externalAgents: Record<number, boolean> = {};
+  const providerIds: Record<number, string> = {};
   for (const [id, agent] of agents) {
     if (agent.directoryName) {
       directoryNames[id] = agent.directoryName;
     }
     if (agent.isExternal) {
       externalAgents[id] = true;
+    }
+    if (agent.providerId) {
+      providerIds[id] = agent.providerId;
     }
   }
   console.log(
@@ -528,6 +532,7 @@ export function sendExistingAgents(
     agentMeta,
     directoryNames,
     externalAgents,
+    providerIds,
   });
   // Note: sendCurrentAgentStatuses is called separately AFTER layoutLoaded
   // so that agentStatus/agentToolStart messages arrive after characters are created.
