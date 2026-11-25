@@ -178,6 +178,17 @@ export function CrossVendorReviewCard({
             {review.result.summary}
           </p>
 
+          {showDetails && review.result.strengths && review.result.strengths.length > 0 && (
+            <div className="text-2xs text-text-muted flex flex-col gap-1">
+              <span className="text-text">優點／確認項目：</span>
+              <ul className="m-0 pl-14 flex flex-col gap-1">
+                {review.result.strengths.map((s, idx) => (
+                  <li key={`${review.reviewId}-s-${idx}`}>{s}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           {showDetails && review.result.findings.length > 0 && (
             <ul className="m-0 p-0 list-none flex flex-col gap-4">
               {review.result.findings.map((f, idx) => (

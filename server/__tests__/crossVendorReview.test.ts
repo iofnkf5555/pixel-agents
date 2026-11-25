@@ -16,6 +16,7 @@ import { AgentStateStore } from '../src/agentStateStore.js';
 import {
   CrossVendorReviewService,
   formatReviewForHost,
+  inspectCliFailureEnvelope,
   parseStructuredReviewOutput,
   redactSensitiveText,
   type ReviewSpawnOptions,
@@ -102,6 +103,35 @@ describe('crossVendorReview & prerequisites', () => {
     expect(agyWrapped?.conversationId).toBe('agy-conv-9988');
     expect(agyWrapped?.result.verdict).toBe('approve');
     expect(agyWrapped?.result.recommendedNextStep).toBeUndefined();
+
+    const agyStructuredWrapper = parseStructuredReviewOutput(
+      JSON.stringify({
+        conversation_id: 'aa8675c0-d941-4aae-b1ae-49900b747b5d',
+        status: 'SUCCESS',
+        response: '',
+        structured_output: {
+          verdict: 'caution',
+          summary: 'Android 與 QNX 屬性映射需加鎖',
+          strengths: ['結構清楚'],
+          findings: [],
+          openQuestions: [],
+          recommendedNextStep: null,
+        },
+      }),
+    );
+    expect(agyStructuredWrapper?.conversationId).toBe('aa8675c0-d941-4aae-b1ae-49900b747b5d');
+    expect(agyStructuredWrapper?.result.verdict).toBe('caution');
+    expect(agyStructuredWrapper?.result.summary).toContain('Android');
+
+    const deniedEnvelopeMsg = inspectCliFailureEnvelope(
+      JSON.stringify({
+        conversation_id: 'd0dd0c06-c044-4863-85b9-a4013bbd78cf',
+        status: 'SUCCESS',
+        response: '',
+        denied_actions: [{ action: 'command', display_name: 'Bash' }],
+      }),
+    );
+    expect(deniedEnvelopeMsg).toContain('Bash');
 
     expect(parseStructuredReviewOutput('not json at all')).toBeNull();
     expect(
@@ -218,16 +248,18 @@ describe('crossVendorReview & prerequisites', () => {
       error: 'subagent_not_communicable',
     });
 
-    // Check read-only sandbox flags for agy
+    // Check read-only sandbox flags for agy (no --mode plan when slash commands are disabled)
     expect(spawned).toHaveLength(1);
     expect(spawned[0].cmd).toBe('/usr/local/bin/agy');
-    expect(spawned[0].args).toContain('--mode');
-    expect(spawned[0].args).toContain('plan');
+    expect(spawned[0].args).not.toContain('--mode');
     expect(spawned[0].args).toContain('--sandbox');
     expect(spawned[0].args).toContain('--disable-slash-commands');
     expect(spawned[0].args).toContain('--json-schema');
     expect(spawned[0].args).toContain('--add-dir');
     expect(spawned[0].args).toContain(workspace);
+    const promptArg = spawned[0].args[spawned[0].args.indexOf('-p') + 1];
+    expect(promptArg).toContain('view_file');
+    expect(promptArg).toContain('invoke_subagent');
     expect(spawned[0].opts.env?.PIXEL_REVIEW_DEPTH).toBe('1');
 
     // Emit completion from mocked agy CLI
@@ -294,6 +326,57 @@ describe('crossVendorReview & prerequisites', () => {
       previousReviewId: r2.review!.reviewId,
     });
     expect(r3).toMatchObject({ ok: false, statusCode: 409, error: 'max_review_rounds_reached' });
+
+    // Wait briefly? No, close above is synchronous. Check that failed denied_actions envelope never leaks raw JSON into result.summary
+    const failedEnvStore = new AgentStateStore();
+    failedEnvStore.set(
+      20,
+      createAgentState({
+        id: 20,
+        sessionId: 'codex-20',
+        isExternal: true,
+        providerId: 'codex',
+        directoryName: 'proj · Denied Test',
+        projectDir: workspace,
+        jsonlFile: '',
+      }),
+    );
+    const failedBridge = new AgentChatBridge({
+      store: failedEnvStore,
+      resolveBin: (n) => `/bin/${n}`,
+    });
+    let deniedChild!: FakeReviewChild;
+    const failedService = new CrossVendorReviewService({
+      store: failedEnvStore,
+      chatBridge: failedBridge,
+      resolveBin: (n) => `/bin/${n}`,
+      spawnProcess: () => {
+        deniedChild = new FakeReviewChild();
+        return deniedChild;
+      },
+    });
+    const invDenied = await failedService.inviteReview({
+      hostAgentId: 20,
+      focus: '需要有 Android Engineer 跟 QNX Engineer 來分析',
+    });
+    expect(invDenied.ok).toBe(true);
+    deniedChild.stdout.write(
+      JSON.stringify({
+        conversation_id: 'd0dd0c06-c044-4863-85b9-a4013bbd78cf',
+        status: 'SUCCESS',
+        response: '',
+        denied_actions: [{ action: 'command', display_name: 'Bash' }],
+        json_schema: { type: 'object' },
+      }),
+    );
+    deniedChild.emit('close', 0);
+    const deniedList = failedService.listReviews(20);
+    expect(deniedList[0].status).toBe('failed');
+    expect(deniedList[0].result).toBeUndefined();
+    expect(deniedList[0].error).toContain('Bash');
+    expect(deniedList[0].error).not.toContain('json_schema');
+    expect(deniedList[0].reviewerConversationId).toBeUndefined();
+    failedService.dispose();
 
     // Dismissing removes synthetic reviewer and clears synthetic isTeamLead
     const dis = service.dismissReview(r2.review!.reviewId);

@@ -1,4 +1,4 @@
-import { spawn } from 'child_process';
+import { execFileSync, spawn } from 'child_process';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -295,6 +295,67 @@ export function parseStructuredReviewOutput(raw: string): ParsedReviewEnvelope |
       recommendedNextStep: cleanOptionalString(obj.recommendedNextStep, 600),
     },
   };
+}
+
+/** Detect CLI wrapper failure envelopes (e.g. empty response or denied Bash/command actions). */
+export function inspectCliFailureEnvelope(raw: string): string | null {
+  const top = tryParseJson(raw);
+  if (!isRecord(top)) return null;
+
+  const isEnvelope =
+    'denied_actions' in top ||
+    'conversation_id' in top ||
+    'json_schema' in top ||
+    'num_turns' in top;
+  if (!isEnvelope) return null;
+
+  if (Array.isArray(top.denied_actions) && top.denied_actions.length > 0) {
+    const names = top.denied_actions
+      .map((item) => {
+        if (!isRecord(item)) return '';
+        const disp = typeof item.display_name === 'string' ? item.display_name.trim() : '';
+        const act = typeof item.action === 'string' ? item.action.trim() : '';
+        return disp || act;
+      })
+      .filter(Boolean);
+    const label = names.length > 0 ? names.join(', ') : '受限工具';
+    return `審查者嘗試執行被唯讀環境禁止的操作（${redactSensitiveText(label)}），導致本次未產出結論；請點擊「重試本輪」。`;
+  }
+
+  if (typeof top.error === 'string' && top.error.trim()) {
+    return `審查中斷：${redactSensitiveText(clipText(top.error, 200))}`;
+  }
+
+  return '審查者未回傳有效審查結論（response 為空），請點擊「重試本輪」。';
+}
+
+function readGitWorkspaceSummary(cwd: string | undefined): string | undefined {
+  if (!cwd) return undefined;
+  try {
+    const status = execFileSync('git', ['status', '--short'], {
+      cwd,
+      timeout: 1500,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    const diffStat = execFileSync('git', ['diff', '--stat'], {
+      cwd,
+      timeout: 1500,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    const parts: string[] = [];
+    if (status) {
+      parts.push(`git status:\n${clipText(status, 400)}`);
+    }
+    if (diffStat) {
+      parts.push(`git diff --stat:\n${clipText(diffStat, 400)}`);
+    }
+    if (parts.length === 0) return undefined;
+    return redactSensitiveText(clipText(parts.join('\n'), 800));
+  } catch {
+    return undefined;
+  }
 }
 
 /** Pick the opposite-vendor reviewer allowed for a host provider. */
@@ -833,10 +894,24 @@ export class CrossVendorReviewService {
       cwd ? `工作目錄：${cwd}` : '工作目錄：未提供具體目錄，請依據提供的脈絡與重點回答。',
     ];
 
+    if (reviewerVendor === 'antigravity') {
+      lines.push(
+        '沙盒與工具規範（務必遵守）：目前運行於非互動唯讀沙盒，run_command / Bash / 終端機指令與 invoke_subagent 都會被系統阻擋並導致輸出空白。請勿執行任何終端機指令或建立子代理人，請僅使用唯讀檔案工具（view_file、list_dir、grep_search、find_by_name）讀取工作區檔案後，直接依 JSON Schema 回傳結構化審查結果。',
+      );
+    }
+
     if (focus) {
       lines.push(`使用者指定審查重點：${focus}`);
+      lines.push(
+        '多角色／多領域分析要求：若審查重點指定了特定工程師或角色視角（例如 Android Engineer、QNX Engineer 等），請直接在 summary 與 findings 中明確以 `[角色名稱]` 分段分析各視角的檢查重點、風險與結論，不要嘗試呼叫 invoke_subagent。',
+      );
     } else {
       lines.push('預設審查重點：檢查近期變更的正確性、邊界條件、安全性、測試覆蓋與架構風險。');
+    }
+
+    const gitSummary = readGitWorkspaceSummary(cwd);
+    if (gitSummary) {
+      lines.push(`工作區變更概覽（唯讀快照）：\n${gitSummary}`);
     }
 
     if (previousResult) {
@@ -853,7 +928,7 @@ export class CrossVendorReviewService {
     lines.push(
       '請嚴格依照指定的 JSON Schema 輸出結構化審查結果（繁體中文撰寫 summary、issue、suggestion、recommendedNextStep）。',
     );
-    return clipText(lines.join('\n\n'), 3600);
+    return clipText(lines.join('\n\n'), 4500);
   }
 
   private launchReviewProcess(
@@ -886,8 +961,6 @@ export class CrossVendorReviewService {
     const args =
       record.reviewerVendor === 'antigravity'
         ? [
-            '--mode',
-            'plan',
             '--sandbox',
             '--disable-slash-commands',
             '--output-format',
@@ -1028,7 +1101,11 @@ export class CrossVendorReviewService {
       handle.cleanupFiles();
 
       if (code !== 0) {
-        this.failReview(record, stderrBuf || stdoutBuf || `exit ${String(code ?? 1)}`);
+        const envelopeErr = inspectCliFailureEnvelope(outputText);
+        this.failReview(
+          record,
+          envelopeErr || stderrBuf || stdoutBuf || `exit ${String(code ?? 1)}`,
+        );
         return;
       }
 
@@ -1038,6 +1115,18 @@ export class CrossVendorReviewService {
           record.reviewerConversationId = envelope.conversationId;
         }
         this.completeReview(record, envelope.result);
+        return;
+      }
+
+      const failureReason = inspectCliFailureEnvelope(outputText);
+      if (failureReason) {
+        this.failReview(record, failureReason);
+        return;
+      }
+
+      const trimmedOut = outputText.trim();
+      if (trimmedOut.startsWith('{') || trimmedOut.startsWith('[')) {
+        this.failReview(record, 'invalid_structured_review_output');
         return;
       }
 
